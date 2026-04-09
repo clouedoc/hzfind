@@ -41,6 +41,9 @@ const C_DIALOG_BORDER: Color = Color::Rgb(80, 90, 140);
 const C_DIALOG_HIGHLIGHT_BG: Color = Color::Rgb(50, 55, 80);
 const C_DIALOG_HIGHLIGHT_FG: Color = Color::Rgb(100, 160, 255);
 const C_PRICE: Color = Color::Rgb(130, 220, 130);
+const C_VAT_BADGE: Color = Color::Rgb(255, 200, 80);
+
+const DEFAULT_VAT_RATE: f64 = 20.0;
 const C_BETTER: Color = Color::Rgb(130, 220, 130);
 const C_WORSE: Color = Color::Rgb(220, 130, 130);
 
@@ -61,6 +64,7 @@ enum Mode {
     Table,
     SortDialog,
     Detail,
+    VatDialog,
 }
 
 struct App {
@@ -74,6 +78,10 @@ struct App {
     selected_item_data: Option<ListItem>,
     sort_names: Vec<&'static str>,
     detail_scroll: u16,
+    vat_enabled: bool,
+    vat_rate: f64,
+    vat_input: String,
+    vat_dialog_parent: Mode,
 }
 
 impl App {
@@ -92,6 +100,10 @@ impl App {
             selected_item_data: None,
             sort_names: vec!["CPU score/€", "RAM/€", "Storage/€"],
             detail_scroll: 0,
+            vat_enabled: true,
+            vat_rate: DEFAULT_VAT_RATE,
+            vat_input: String::new(),
+            vat_dialog_parent: Mode::Table,
         }
     }
 
@@ -191,6 +203,7 @@ pub async fn run() -> Result<()> {
                         Mode::Table => handle_table_key(key, &mut app),
                         Mode::SortDialog => handle_sort_dialog_key(key, &mut app),
                         Mode::Detail => handle_detail_key(key, &mut app),
+                        Mode::VatDialog => handle_vat_dialog_key(key, &mut app),
                     }
                     if prev_mode == Mode::Table && (should_quit(&key) || key.code == event::KeyCode::Esc) {
                         break;
@@ -249,6 +262,16 @@ fn handle_table_key(key: KeyEvent, app: &mut App) {
         app.mode = Mode::SortDialog;
     }
 
+    if key.code == event::KeyCode::Char('v') {
+        app.vat_enabled = !app.vat_enabled;
+    }
+
+    if key.code == event::KeyCode::Char('t') && app.vat_enabled {
+        app.vat_input = format!("{:.0}", app.vat_rate);
+        app.vat_dialog_parent = app.mode;
+        app.mode = Mode::VatDialog;
+    }
+
     if key.code == event::KeyCode::Enter {
         app.open_detail();
     }
@@ -297,6 +320,30 @@ fn handle_sort_dialog_key(key: KeyEvent, app: &mut App) {
     }
 }
 
+fn handle_vat_dialog_key(key: KeyEvent, app: &mut App) {
+    match key.code {
+        event::KeyCode::Char(c) if c.is_ascii_digit() || c == '.' => {
+            if app.vat_input.len() < 6 {
+                app.vat_input.push(c);
+            }
+        }
+        event::KeyCode::Backspace => {
+            app.vat_input.pop();
+        }
+        event::KeyCode::Enter => {
+            if let Ok(rate) = app.vat_input.parse::<f64>() {
+                app.vat_rate = rate.clamp(0.0, 999.0);
+            }
+            app.mode = app.vat_dialog_parent;
+        }
+        _ if should_close(&key) => {
+            app.vat_input = String::new();
+            app.mode = app.vat_dialog_parent;
+        }
+        _ => {}
+    }
+}
+
 fn handle_detail_key(key: KeyEvent, app: &mut App) {
     let scroll_step = 3;
 
@@ -319,6 +366,16 @@ fn handle_detail_key(key: KeyEvent, app: &mut App) {
         && matches!(key.code, event::KeyCode::Char('G'))
     {
         app.detail_scroll = 0;
+    }
+
+    if key.code == event::KeyCode::Char('v') {
+        app.vat_enabled = !app.vat_enabled;
+    }
+
+    if key.code == event::KeyCode::Char('t') && app.vat_enabled {
+        app.vat_input = format!("{:.0}", app.vat_rate);
+        app.vat_dialog_parent = app.mode;
+        app.mode = Mode::VatDialog;
     }
 
     if key.code == event::KeyCode::Char('o')
@@ -354,7 +411,7 @@ fn render_loading(f: &mut Frame, dot_frame: usize) {
 
 fn render(f: &mut Frame, app: &mut App) {
     let bg = match app.mode {
-        Mode::Table | Mode::SortDialog => C_ROW,
+        Mode::Table | Mode::SortDialog | Mode::VatDialog => C_ROW,
         Mode::Detail => C_DIALOG_BG,
     };
     f.render_widget(Block::default().style(Style::default().bg(bg)), f.area());
@@ -365,6 +422,14 @@ fn render(f: &mut Frame, app: &mut App) {
             render_sort_dialog(f, app);
         }
         Mode::Detail => render_detail(f, app),
+        Mode::VatDialog => {
+            match app.vat_dialog_parent {
+                Mode::Table => render_table(f, app),
+                Mode::Detail => render_detail(f, app),
+                _ => render_table(f, app),
+            }
+            render_vat_dialog(f, app);
+        }
     }
 }
 
@@ -401,6 +466,20 @@ fn render_table(f: &mut Frame, app: &mut App) {
         ),
         Span::styled("  [s]", Style::default().fg(C_DIM)),
     ]);
+    let header = if app.vat_enabled {
+        let mut spans = header.spans;
+        spans.push(Span::raw("    "));
+        spans.push(Span::styled(
+            format!(" VAT {:.0}% ", app.vat_rate),
+            Style::default()
+                .fg(Color::Black)
+                .bg(C_VAT_BADGE)
+                .add_modifier(Modifier::BOLD),
+        ));
+        Line::from(spans)
+    } else {
+        header
+    };
     let header_block = Block::default()
         .style(Style::default().bg(C_HEADER_BG).fg(C_HEADER_FG))
         .padding(Padding::horizontal(1));
@@ -420,30 +499,41 @@ fn render_table(f: &mut Frame, app: &mut App) {
         .unwrap_or(0)
         .max(6) as u16;
     let widths = [
-        Constraint::Length(7),       // ID
+        Constraint::Length(7),        // ID
+        Constraint::Length(1),   // sep
         Constraint::Length(max_cpu_len), // CPU
-        Constraint::Length(4),  // CPU#
-        Constraint::Length(8),  // Cores
-        Constraint::Length(8),  // RAM
-        Constraint::Length(10), // Storage
-        Constraint::Length(10), // CPU Sc/€
-        Constraint::Length(10), // Storage/€
-        Constraint::Length(10), // RAM/€
-        Constraint::Length(7),  // Price
-        Constraint::Length(9),  // DC
+        Constraint::Length(1),   // sep
+        Constraint::Length(4),   // CPU#
+        Constraint::Length(8),   // Cores
+        Constraint::Length(8),   // RAM
+        Constraint::Length(10),  // Storage
+        Constraint::Length(1),   // sep
+        Constraint::Length(10),  // CPU Sc/€
+        Constraint::Length(10),  // RAM/€
+        Constraint::Length(10),  // Storage/€
+        Constraint::Length(1),   // sep
+        Constraint::Length(10),  // Price
+        Constraint::Length(1),   // sep
+        Constraint::Length(9),   // DC
     ];
 
     let active_col = match app.sort {
-        SortField::Cpu => 6,
-        SortField::Ram => 7,
-        SortField::Storage => 8,
+        SortField::Cpu => 9,
+        SortField::Ram => 10,
+        SortField::Storage => 11,
     };
+    let sep_style = Style::default().fg(C_DIM);
+    const SEP_COLS: [usize; 5] = [1, 3, 8, 12, 14];
     let header_cells: Vec<Cell> = [
-        "ID", "CPU", "CPU#", "Cores", "RAM", "Storage", "CPU Sc/€", "RAM/€", "Storage/€", "Price", "DC",
+        "ID", "│", "CPU", "│", "CPU#", "Cores", "RAM", "Storage", "│", "CPU Sc/€", "RAM/€", "Storage/€",
+        "│", "Price", "│", "DC",
     ]
     .into_iter()
     .enumerate()
     .map(|(col, text)| {
+        if SEP_COLS.contains(&col) {
+            return Cell::new(text).style(sep_style);
+        }
         let style = if col == active_col {
             Style::default()
                 .fg(C_ACCENT)
@@ -471,7 +561,9 @@ fn render_table(f: &mut Frame, app: &mut App) {
             let active_style = Style::default().fg(C_ACCENT).bg(base_bg).bold();
             let cells = [
                 Cell::new(item.hz_auction_id.to_string()),
+                Cell::new("│").style(sep_style),
                 Cell::new(item.cpu_name.as_str()),
+                Cell::new("│").style(sep_style),
                 Cell::new(item.cpu_count.to_string()),
                 Cell::new(match (item.p_cores, item.e_cores) {
                     (None, _) => "—".into(),
@@ -480,6 +572,7 @@ fn render_table(f: &mut Frame, app: &mut App) {
                 }),
                 Cell::new(format!("{} GB", item.ram_size_gb)),
                 Cell::new(storage_str(item.total_storage_gb)),
+                Cell::new("│").style(sep_style),
                 Cell::new(
                     item.cpu_score_per_eur
                         .map(|v| format!("{v:.1}"))
@@ -487,13 +580,22 @@ fn render_table(f: &mut Frame, app: &mut App) {
                 ),
                 Cell::new(format!("{:.1}", item.ram_gb_per_eur)),
                 Cell::new(format!("{:.1}", item.storage_gb_per_eur)),
-                Cell::new(format!("€{:.2}", item.price_monthly_eur)),
+                Cell::new("│").style(sep_style),
+                Cell::new(if app.vat_enabled {
+                    format!("€{:.2}", item.price_monthly_eur * (1.0 + app.vat_rate / 100.0))
+                } else {
+                    format!("€{:.2}", item.price_monthly_eur)
+                }),
+                Cell::new("│").style(sep_style),
                 Cell::new(item.hz_datacenter_location.as_str()),
             ];
             let cells: Vec<Cell> = cells
                 .into_iter()
                 .enumerate()
                 .map(|(col, cell)| {
+                    if SEP_COLS.contains(&col) {
+                        return cell;
+                    }
                     if col == active_col {
                         cell.style(active_style)
                     } else {
@@ -543,10 +645,17 @@ fn render_table(f: &mut Frame, app: &mut App) {
 
     // ── Footer ───────────────────────────────────────────────────────────
     let count = app.items.len();
-    let footer_text = format!(
-        " {} servers │ ↑↓ navigate │ s sort │ Enter details │ q/Esc quit ",
-        count
-    );
+    let footer_text = if app.vat_enabled {
+        format!(
+            " {} servers │ ↑↓ navigate │ s sort │ v toggle VAT │ t VAT rate │ Enter details │ q/Esc quit ",
+            count
+        )
+    } else {
+        format!(
+            " {} servers │ ↑↓ navigate │ s sort │ Enter details │ q/Esc quit ",
+            count
+        )
+    };
     let footer_block = Block::default().style(
         Style::default()
             .bg(C_FOOTER_BG)
@@ -608,6 +717,44 @@ fn render_sort_dialog(f: &mut Frame, app: &mut App) {
         .highlight_spacing(HighlightSpacing::Always);
 
     f.render_stateful_widget(table, area, &mut app.sort_state);
+}
+
+fn render_vat_dialog(f: &mut Frame, app: &mut App) {
+    let area = centered_rect(32, 7, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" VAT Rate ")
+        .title_alignment(Alignment::Center)
+        .title_style(
+            Style::default()
+                .fg(C_ACCENT)
+                .add_modifier(Modifier::BOLD),
+        )
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(C_DIALOG_BORDER))
+        .style(Style::default().bg(C_DIALOG_BG));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let lines = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .split(inner);
+
+    let prompt = Line::from(vec![
+        Span::styled("Enter VAT rate (%): ", Style::default().fg(C_DIM)),
+    ]);
+    f.render_widget(ratatui::widgets::Paragraph::new(prompt), lines[0]);
+
+    let input_with_cursor = format!("{}█", app.vat_input);
+    f.render_widget(
+        ratatui::widgets::Paragraph::new(input_with_cursor)
+            .style(Style::default().fg(C_VALUE)),
+        lines[1],
+    );
 }
 
 fn render_detail(f: &mut Frame, app: &mut App) {
@@ -692,27 +839,54 @@ fn render_detail(f: &mut Frame, app: &mut App) {
         ]),
         detail_line(
             "  Monthly",
-            &format!("€{:.2}", auction.price),
+            &if app.vat_enabled {
+                format!("€{:.2} (VAT incl.)", auction.price * (1.0 + app.vat_rate / 100.0))
+            } else {
+                format!("€{:.2}", auction.price)
+            },
             label,
-            Style::default().fg(C_PRICE),
+            value,
         ),
         detail_line(
             "  Setup",
-            &format!("€{:.2}", auction.setup_price),
+            &if app.vat_enabled {
+                format!("€{:.2} (VAT incl.)", auction.setup_price * (1.0 + app.vat_rate / 100.0))
+            } else {
+                format!("€{:.2}", auction.setup_price)
+            },
             label,
             value,
         ),
         detail_line(
             "  Hourly",
-            &format!("€{:.4}", auction.hourly_price),
+            &if app.vat_enabled {
+                format!("€{:.4} (VAT incl.)", auction.hourly_price * (1.0 + app.vat_rate / 100.0))
+            } else {
+                format!("€{:.4}", auction.hourly_price)
+            },
             label,
             value,
         ),
         detail_line(
             "  IP (monthly)",
-            &format!("€{:.2}", auction.ip_price.monthly),
+            &if app.vat_enabled {
+                format!("€{:.2} (VAT incl.)", auction.ip_price.monthly * (1.0 + app.vat_rate / 100.0))
+            } else {
+                format!("€{:.2}", auction.ip_price.monthly)
+            },
             label,
             value,
+        ),
+        detail_line(
+            "  Total Monthly",
+            &if app.vat_enabled {
+                let total = (auction.price + auction.ip_price.monthly) * (1.0 + app.vat_rate / 100.0);
+                format!("€{:.2} (VAT incl.)", total)
+            } else {
+                format!("€{:.2}", auction.price + auction.ip_price.monthly)
+            },
+            label,
+            Style::default().fg(C_PRICE),
         ),
         detail_line(
             "  Fixed Price",
@@ -917,7 +1091,11 @@ fn render_detail(f: &mut Frame, app: &mut App) {
     f.render_widget(footer_block, chunks[1]);
     f.render_widget(
         ratatui::widgets::Paragraph::new(
-            " ↑↓ scroll     [o] Open in browser     [q/Esc] Back to table ",
+            if app.vat_enabled {
+                " ↑↓ scroll │ v toggle VAT │ t VAT rate │ o open browser │ q/Esc back "
+            } else {
+                " ↑↓ scroll │ v toggle VAT │ o open browser │ q/Esc back "
+            },
         )
         .alignment(Alignment::Center),
         footer_inner,

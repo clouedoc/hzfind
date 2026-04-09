@@ -4,7 +4,7 @@ A CLI/TUI to find the best [Hetzner Server Auction](https://www.hetzner.com/sb/)
 
 Ships with the [PassMark](https://www.cpubenchmark.net/) CPU benchmark database built-in so you can instantly comapre servers by **value per euro** - CPU score/€, RAM/€, and storage/€.
 
-Hetzner auction data is fetched live. Prices are **exclusive of VAT**.
+Hetzner auction data is fetched live. Prices are **inclusive of VAT**. VAT calculation can be disabled by pressing `v` and the rate can be configured by pressing `t`.
 
 ## Screenshots
 
