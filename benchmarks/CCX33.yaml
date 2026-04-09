@@ -1,0 +1,86 @@
+BaselineInfo:
+  WebDBID: -1
+  TimeStamp: 20260409195938
+Version:
+  Major: 11
+  Minor: 0
+  Build: 1004
+  SpecialBuildName: ""
+  ptArchitecture: x86_64_linux
+Results:
+  Results Complete: true
+  NumTestProcesses: 8
+  CPU_INTEGER_MATH: 37689.498
+  CPU_FLOATINGPOINT_MATH: 23982.832231567194
+  CPU_PRIME: 92.321185300498939
+  CPU_SORTING: 23309.84560414356
+  CPU_ENCRYPTION: 9701.8567658155862
+  CPU_COMPRESSION: 154819.86254529335
+  CPU_SINGLETHREAD: 2900.7217188442596
+  CPU_PHYSICS: 1911.1981998461813
+  CPU_MATRIX_MULT_SSE: 10057.265225772402
+  CPU_mm: 1045.3945260995558
+  CPU_sse: 4893.4751197677087
+  CPU_fma: 13925.24186407185
+  CPU_avx: 11353.078693477648
+  CPU_avx512: 0
+  m_CPU_enc_SHA: 13725987509.14547
+  m_CPU_enc_AES: 9064613072.9803925
+  m_CPU_enc_ECDSA: 7728801898.0896702
+  ME_ALLOC_S: 0
+  ME_READ_S: 0
+  ME_READ_L: 0
+  ME_WRITE: 0
+  ME_LARGE: 0
+  ME_LATENCY: 0
+  ME_THREADED: 0
+  SUMM_CPU: 14693.688401653237
+  SUMM_ME: 0
+SystemInformation:
+  OSName: Fedora Linux 43 (Forty Three)
+  Kernel: 6.18.3-200.fc43.x86_64
+  Device: ""
+  Processor: AMD EPYC-Milan Processor
+  NumSockets: 1
+  Manufacturer: AuthenticAMD
+  NumCores: 4
+  NumLogicals: 8
+  CPUFrequency: 0
+  CPUMaxFrequency: 0
+  Memory: 31322
+  CPUInfo:
+    number: 1
+    Family: 15
+    Model: 1
+    stepping: 1
+    features: 395049983
+    manufacture: AuthenticAMD
+    typestring: AMD EPYC-Milan Processor
+    iCoresPerPackage: 4
+    iThreadsPerPackage: 2
+    featuresEx:
+      - 395049983
+      - 4277809667
+      - 802421759
+    bHybrid: false
+    nPCore: 0
+    nLogicalsPerPCore: 0
+    nECore: 0
+    nLogicalsPerECore: 0
+  MemModuleInfo:
+    iNumMemSticks: 2
+    DIMM 1:
+      manufacturer: QEMU
+      modulePartNo: Not Specified
+      memType: RAM
+      size: 16
+      clkspeed: 0
+      moduleVoltage: 0
+    DIMM 2:
+      manufacturer: QEMU
+      modulePartNo: Not Specified
+      memType: RAM
+      size: 15616
+      clkspeed: 0
+      moduleVoltage: 0
+Checksum: AACA1E33B165C818EA35D29F10ED24C565A4AF22
