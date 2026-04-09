@@ -155,11 +155,9 @@ pub async fn run() -> Result<()> {
 
     // Spawn data fetch so we can animate the loading screen
     let handle = tokio::spawn(async move {
-        let auctions = fetch_auctions()
-            .await
-            .expect("failed to fetch Hetzner auctions");
+        let auctions = fetch_auctions().await?;
         let items = build_list(&auctions);
-        (items, auctions)
+        eyre::Ok((items, auctions))
     });
 
     // Animated loading screen
@@ -187,7 +185,25 @@ pub async fn run() -> Result<()> {
         }
     }
 
-    let (items, auctions) = handle.await.expect("task panicked");
+    let data_result = handle
+        .await
+        .map_err(|e| eyre::eyre!("Task panicked: {e}"))
+        .and_then(|r| r);
+
+    let (items, auctions) = match data_result {
+        Ok(data) => data,
+        Err(err) => {
+            terminal.draw(|f| render_error_screen(f, &err))?;
+            loop {
+                if let Some(Ok(Event::Key(_))) = events.next().await {
+                    break;
+                }
+            }
+            restore_terminal()?;
+            return Err(err);
+        }
+    };
+
     let mut app = App::new(items, auctions);
 
     loop {
@@ -406,6 +422,79 @@ fn render_loading(f: &mut Frame, dot_frame: usize) {
         ratatui::widgets::Paragraph::new(loading_text)
             .alignment(Alignment::Center),
         centered,
+    );
+}
+
+fn render_error_screen(f: &mut Frame, error: &eyre::Report) {
+    f.render_widget(
+        Block::default().style(Style::default().bg(C_ROW)),
+        f.area(),
+    );
+
+    let area = centered_rect(64, 13, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Error ")
+        .title_alignment(Alignment::Center)
+        .title_style(
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        )
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Rgb(180, 60, 60)))
+        .style(Style::default().bg(C_DIALOG_BG));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let chunks = Layout::vertical([
+        Constraint::Length(2), // title
+        Constraint::Min(0),   // error chain
+        Constraint::Length(1), // spacer
+        Constraint::Length(1), // hint
+    ])
+    .split(inner);
+
+    let title = Line::from(Span::styled(
+        "✕  Failed to fetch Hetzner auction data",
+        Style::default()
+            .fg(Color::Red)
+            .add_modifier(Modifier::BOLD),
+    ));
+    f.render_widget(
+        ratatui::widgets::Paragraph::new(title),
+        chunks[0],
+    );
+
+    let mut error_lines: Vec<Line> = error
+        .chain()
+        .take(6)
+        .map(|err| {
+            Line::from(Span::styled(
+                err.to_string(),
+                Style::default().fg(C_VALUE),
+            ))
+        })
+        .collect();
+    if error.chain().count() > 6 {
+        error_lines.push(Line::from(Span::styled(
+            "  …",
+            Style::default().fg(C_DIM),
+        )));
+    }
+    f.render_widget(
+        ratatui::widgets::Paragraph::new(error_lines).wrap(Wrap { trim: false }),
+        chunks[1],
+    );
+
+    let hint = Line::from(Span::styled(
+        "Press any key to exit",
+        Style::default().fg(C_DIM),
+    ));
+    f.render_widget(
+        ratatui::widgets::Paragraph::new(hint).alignment(Alignment::Center),
+        chunks[3],
     );
 }
 
