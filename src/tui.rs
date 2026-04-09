@@ -269,7 +269,17 @@ pub async fn run() -> Result<()> {
                 );
             }
             Some(Ok(event)) = events.next() => {
-                if matches!(event, Event::Resize(_, _)) {}
+                if let Event::Key(key) = event {
+                    if key.kind == KeyEventKind::Press
+                        && (key.modifiers.contains(KeyModifiers::CONTROL)
+                            && key.code == event::KeyCode::Char('c')
+                            || key.code == event::KeyCode::Char('q'))
+                    {
+                        handle.abort();
+                        restore_terminal()?;
+                        return Ok(());
+                    }
+                }
             }
         }
 
