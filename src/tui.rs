@@ -1,5 +1,7 @@
 use std::io;
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use num_format::ToFormattedString;
 
@@ -18,6 +20,8 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 use ratatui::Terminal;
+
+use tokio::sync::RwLock;
 
 use crate::list::{build_list, sort_items, ListItem, SortField};
 use hzfind::hetzner_auction::{fetch_auctions, HetznerAuction};
@@ -57,6 +61,14 @@ const CCX33_CPU_SCORE_PER_EUR: f64 = CCX33_CPU_SCORE / CCX33_PRICE;
 const CCX33_RAM_PER_EUR: f64 = CCX33_RAM_GB / CCX33_PRICE;
 const CCX33_STORAGE_PER_EUR: f64 = CCX33_STORAGE_GB / CCX33_PRICE;
 
+// ── Shared data (background-fetch → render bridge) ─────────────────────────
+
+struct SharedData {
+    items: Vec<ListItem>,
+    auctions: Vec<HetznerAuction>,
+    last_fetched: Instant,
+}
+
 // ── App state ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -82,6 +94,13 @@ struct App {
     vat_rate: f64,
     vat_input: String,
     vat_dialog_parent: Mode,
+    live: bool,
+    last_fetched: Instant,
+    last_fetch_failed: bool,
+    shared: Arc<RwLock<Arc<SharedData>>>,
+    current_snapshot: Arc<SharedData>,
+    fetching: Arc<AtomicBool>,
+    fetch_failed_flag: Arc<AtomicBool>,
 }
 
 impl App {
@@ -89,6 +108,13 @@ impl App {
         sort_items(&mut items, SortField::Cpu);
         let mut table_state = TableState::default();
         table_state.select(Some(0));
+        let last_fetched = Instant::now();
+        let snapshot = Arc::new(SharedData {
+            items: items.clone(),
+            auctions: auctions.clone(),
+            last_fetched,
+        });
+        let shared = Arc::new(RwLock::new(snapshot.clone()));
         Self {
             items,
             auctions,
@@ -104,7 +130,74 @@ impl App {
             vat_rate: DEFAULT_VAT_RATE,
             vat_input: String::new(),
             vat_dialog_parent: Mode::Table,
+            live: false,
+            last_fetched,
+            last_fetch_failed: false,
+            shared,
+            current_snapshot: snapshot,
+            fetching: Arc::new(AtomicBool::new(false)),
+            fetch_failed_flag: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Pick up new data from the background fetcher, if available.
+    fn sync_data(&mut self) {
+        if self.fetch_failed_flag.swap(false, Ordering::Relaxed) {
+            self.last_fetch_failed = true;
+        }
+        if let Ok(guard) = self.shared.try_read()
+            && !Arc::ptr_eq(&self.current_snapshot, &guard)
+        {
+            self.current_snapshot = Arc::clone(&guard);
+            let selected_id = self.table_state.selected();
+            let mut new_items = self.current_snapshot.items.clone();
+            sort_items(&mut new_items, self.sort);
+            self.items = new_items;
+            self.auctions = self.current_snapshot.auctions.clone();
+            self.table_state
+                .select(selected_id.map(|i| i.min(self.items.len().saturating_sub(1))));
+            self.last_fetched = self.current_snapshot.last_fetched;
+            self.last_fetch_failed = false;
+        }
+    }
+
+    /// Spawn a non-blocking background fetch (no-op if one is already running).
+    fn start_fetch(&self) {
+        if self.fetching.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let shared = Arc::clone(&self.shared);
+        let fetching = Arc::clone(&self.fetching);
+        let fetch_failed_flag = Arc::clone(&self.fetch_failed_flag);
+        let sort = self.sort;
+        tokio::spawn(async move {
+            let result = async {
+                let auctions = fetch_auctions().await?;
+                let mut items = build_list(&auctions);
+                sort_items(&mut items, sort);
+                eyre::Ok((items, auctions))
+            }
+            .await;
+            match result {
+                Ok((items, auctions)) => {
+                    let snapshot = Arc::new(SharedData {
+                        items,
+                        auctions,
+                        last_fetched: Instant::now(),
+                    });
+                    let mut guard = shared.write().await;
+                    *guard = snapshot;
+                }
+                Err(_) => {
+                    fetch_failed_flag.store(true, Ordering::Relaxed);
+                }
+            }
+            fetching.store(false, Ordering::Relaxed);
+        });
+    }
+
+    fn data_age(&self) -> Duration {
+        self.last_fetched.elapsed()
     }
 
     fn apply_sort(&mut self) {
@@ -205,27 +298,38 @@ pub async fn run() -> Result<()> {
     };
 
     let mut app = App::new(items, auctions);
+    let mut refresh_interval = tokio::time::interval(Duration::from_secs(10));
+    refresh_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut render_tick = tokio::time::interval(Duration::from_secs(1));
+    app.start_fetch();
 
     loop {
+        app.sync_data();
         terminal.draw(|f| render(f, &mut app))?;
 
-        if let Some(Ok(event)) = events.next().await {
-            match event {
-                Event::Resize(_, _) => continue,
-                Event::Key(key) if key.kind != KeyEventKind::Press => continue,
-                Event::Key(key) => {
-                    let prev_mode = app.mode;
-                    match app.mode {
-                        Mode::Table => handle_table_key(key, &mut app),
-                        Mode::SortDialog => handle_sort_dialog_key(key, &mut app),
-                        Mode::Detail => handle_detail_key(key, &mut app),
-                        Mode::VatDialog => handle_vat_dialog_key(key, &mut app),
+        tokio::select! {
+            _ = render_tick.tick() => {}
+            _ = refresh_interval.tick(), if app.live => {
+                app.start_fetch();
+            }
+            Some(Ok(event)) = events.next() => {
+                match event {
+                    Event::Resize(_, _) => continue,
+                    Event::Key(key) if key.kind != KeyEventKind::Press => continue,
+                    Event::Key(key) => {
+                        let prev_mode = app.mode;
+                        match app.mode {
+                            Mode::Table => handle_table_key(key, &mut app),
+                            Mode::SortDialog => handle_sort_dialog_key(key, &mut app),
+                            Mode::Detail => handle_detail_key(key, &mut app),
+                            Mode::VatDialog => handle_vat_dialog_key(key, &mut app),
+                        }
+                        if prev_mode == Mode::Table && (should_quit(&key) || key.code == event::KeyCode::Esc) {
+                            break;
+                        }
                     }
-                    if prev_mode == Mode::Table && (should_quit(&key) || key.code == event::KeyCode::Esc) {
-                        break;
-                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
     }
@@ -280,6 +384,13 @@ fn handle_table_key(key: KeyEvent, app: &mut App) {
 
     if key.code == event::KeyCode::Char('v') {
         app.vat_enabled = !app.vat_enabled;
+    }
+
+    if key.code == event::KeyCode::Char('l') {
+        app.live = !app.live;
+        if app.live {
+            app.start_fetch();
+        }
     }
 
     if key.code == event::KeyCode::Char('t') && app.vat_enabled {
@@ -569,14 +680,56 @@ fn render_table(f: &mut Frame, app: &mut App) {
     } else {
         header
     };
+
     let header_block = Block::default()
         .style(Style::default().bg(C_HEADER_BG).fg(C_HEADER_FG))
         .padding(Padding::horizontal(1));
     let header_inner = header_block.inner(chunks[0]);
     f.render_widget(header_block, chunks[0]);
+
+    let header_cols = Layout::horizontal([
+        Constraint::Min(0),       // left side
+        Constraint::Length(28),   // right side: age display
+    ])
+    .split(header_inner);
+
     f.render_widget(
         ratatui::widgets::Paragraph::new(header),
-        header_inner,
+        header_cols[0],
+    );
+
+    // Right-aligned: last fetched age + live indicator
+    let age_secs = app.data_age().as_secs();
+    let age_str = if age_secs < 60 {
+        format!("{}s", age_secs)
+    } else {
+        format!("{}m {}s", age_secs / 60, age_secs % 60)
+    };
+    // Right-aligned: last fetched age (only when live mode is active)
+    let mut right_spans = Vec::new();
+    if app.live {
+        if app.last_fetch_failed {
+            right_spans.push(Span::styled(
+                "last fetch failed ",
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+        right_spans.push(Span::styled(
+            format!(" last fetched: {age_str} "),
+            if age_secs >= 60 {
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Red)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(C_DIM)
+            },
+        ));
+    }
+    f.render_widget(
+        ratatui::widgets::Paragraph::new(Line::from(right_spans))
+            .alignment(Alignment::Right),
+        header_cols[1],
     );
 
     // ── Table ────────────────────────────────────────────────────────────
@@ -734,14 +887,19 @@ fn render_table(f: &mut Frame, app: &mut App) {
 
     // ── Footer ───────────────────────────────────────────────────────────
     let count = app.items.len();
+    let live_tag = if app.live {
+        " │ l disable live mode"
+    } else {
+        " │ l enable live mode"
+    };
     let footer_text = if app.vat_enabled {
         format!(
-            " {} servers │ ↑↓ navigate │ s sort │ v toggle VAT │ t VAT rate │ Enter details │ q/Esc quit ",
+            " {} servers │ ↑↓ navigate │ s sort │ v toggle VAT │ t VAT rate │ Enter details │{live_tag} │ q/Esc quit ",
             count
         )
     } else {
         format!(
-            " {} servers │ ↑↓ navigate │ s sort │ Enter details │ q/Esc quit ",
+            " {} servers │ ↑↓ navigate │ s sort │ Enter details │{live_tag} │ q/Esc quit ",
             count
         )
     };
