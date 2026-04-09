@@ -423,7 +423,7 @@ fn render_table(f: &mut Frame, app: &mut App) {
         Constraint::Length(7),       // ID
         Constraint::Length(max_cpu_len), // CPU
         Constraint::Length(4),  // CPU#
-        Constraint::Length(6),  // Cores
+        Constraint::Length(8),  // Cores
         Constraint::Length(8),  // RAM
         Constraint::Length(10), // Storage
         Constraint::Length(10), // CPU Sc/€
@@ -473,11 +473,11 @@ fn render_table(f: &mut Frame, app: &mut App) {
                 Cell::new(item.hz_auction_id.to_string()),
                 Cell::new(item.cpu_name.as_str()),
                 Cell::new(item.cpu_count.to_string()),
-                Cell::new(
-                    item.total_cores
-                        .map(|c| c.to_string())
-                        .unwrap_or_else(|| "—".into()),
-                ),
+                Cell::new(match (item.p_cores, item.e_cores) {
+                    (None, _) => "—".into(),
+                    (Some(p), Some(e)) if e > 0 => format!("{p}P+{e}E"),
+                    (Some(_), _) => item.total_cores.map(|c| c.to_string()).unwrap_or_else(|| "—".into()),
+                }),
                 Cell::new(format!("{} GB", item.ram_size_gb)),
                 Cell::new(storage_str(item.total_storage_gb)),
                 Cell::new(
@@ -640,12 +640,14 @@ fn render_detail(f: &mut Frame, app: &mut App) {
         detail_line(
             "  Cores",
             &match auction.cpu_passmark_score() {
-                Some(score) => format!(
-                    "{} ({} cores × {} CPUs)",
-                    score.cores * auction.cpu_count,
-                    score.cores,
-                    auction.cpu_count
-                ),
+                Some(score) => {
+                    let per_cpu = if score.e_cores > 0 {
+                        format!("{}P + {}E", score.p_cores, score.e_cores)
+                    } else {
+                        format!("{} cores", score.cores)
+                    };
+                    format!("{} ({} × {} CPUs)", score.cores * auction.cpu_count, per_cpu, auction.cpu_count)
+                }
                 None => "—".to_string(),
             },
             label,

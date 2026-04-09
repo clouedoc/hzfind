@@ -26,6 +26,10 @@ pub struct ListItem {
     pub total_storage_gb: u32,
     /// Total cores (cores_per_cpu × cpu_count). None if no PassMark match.
     pub total_cores: Option<u32>,
+    /// P-cores per CPU (None if no PassMark match)
+    pub p_cores: Option<u32>,
+    /// E-cores per CPU (None if no PassMark match)
+    pub e_cores: Option<u32>,
     /// PassMark score of a single CPU (None if no match)
     pub individual_cpu_score: Option<u32>,
     /// PassMark score × cpu_count (None if no match)
@@ -50,6 +54,8 @@ pub fn build_list(auctions: &[HetznerAuction]) -> Vec<ListItem> {
             let individual_cpu_score = score.map(|s| s.cpumark);
             let total_cpu_score = individual_cpu_score.map(|s| s * auction.cpu_count);
             let total_cores = score.map(|s| s.cores * auction.cpu_count);
+            let p_cores = score.map(|s| s.p_cores);
+            let e_cores = score.map(|s| s.e_cores);
             let price_monthly_eur = auction.price + auction.ip_price.monthly;
             let total_storage_gb = auction.hdd_size * auction.hdd_count;
             let cpu_score_per_eur = total_cpu_score.map(|s| s as f64 / price_monthly_eur);
@@ -63,6 +69,8 @@ pub fn build_list(auctions: &[HetznerAuction]) -> Vec<ListItem> {
                 individual_cpu_score,
                 total_cpu_score,
                 total_cores,
+                p_cores,
+                e_cores,
                 price_monthly_eur,
                 cpu_score_per_eur,
                 storage_gb_per_eur: total_storage_gb as f64 / price_monthly_eur,
@@ -126,6 +134,8 @@ mod tests {
                 .find(|s| s.cpumark == indiv_score)
                 .expect("matching passmark entry not found");
             assert_eq!(cores, score.cores * first.cpu_count);
+            assert_eq!(first.p_cores, Some(score.p_cores));
+            assert_eq!(first.e_cores, Some(score.e_cores));
         }
     }
 
