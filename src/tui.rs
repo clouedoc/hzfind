@@ -269,16 +269,15 @@ pub async fn run() -> Result<()> {
                 );
             }
             Some(Ok(event)) = events.next() => {
-                if let Event::Key(key) = event {
-                    if key.kind == KeyEventKind::Press
-                        && (key.modifiers.contains(KeyModifiers::CONTROL)
-                            && key.code == event::KeyCode::Char('c')
-                            || key.code == event::KeyCode::Char('q'))
-                    {
-                        handle.abort();
-                        restore_terminal()?;
-                        return Ok(());
-                    }
+                if let Event::Key(key) = event
+                    && key.kind == KeyEventKind::Press
+                    && (key.modifiers.contains(KeyModifiers::CONTROL)
+                        && key.code == event::KeyCode::Char('c')
+                        || key.code == event::KeyCode::Char('q'))
+                {
+                    handle.abort();
+                    restore_terminal()?;
+                    return Ok(());
                 }
             }
         }
@@ -1051,6 +1050,22 @@ fn render_detail(f: &mut Frame, app: &mut App) {
                         format!("{} cores", score.cores)
                     };
                     format!("{} ({} × {} CPUs)", score.cores * auction.cpu_count, per_cpu, auction.cpu_count)
+                }
+                None => "—".to_string(),
+            },
+            label,
+            value,
+        ),
+        detail_line(
+            "  Threads",
+            &match auction.cpu_passmark_score() {
+                Some(score) => {
+                    let total = (score.p_threads + score.e_threads) * auction.cpu_count;
+                    if score.e_threads > 0 {
+                        format!("{} ({}P + {}E) × {} CPUs", total, score.p_threads, score.e_threads, auction.cpu_count)
+                    } else {
+                        format!("{} ({}P × {} CPUs)", total, score.p_threads, auction.cpu_count)
+                    }
                 }
                 None => "—".to_string(),
             },
