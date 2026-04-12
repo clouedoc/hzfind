@@ -5,26 +5,27 @@ use std::time::{Duration, Instant};
 
 use num_format::ToFormattedString;
 
+use crossterm::ExecutableCommand;
 use crossterm::event::{self, Event, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
-use crossterm::ExecutableCommand;
 use eyre::Result;
 use futures::StreamExt;
+use ratatui::Frame;
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Cell, Clear, HighlightSpacing, Padding, Row, Scrollbar,
-    ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap,
+    Block, Borders, Cell, Clear, HighlightSpacing, Padding, Row, Scrollbar, ScrollbarOrientation,
+    ScrollbarState, Table, TableState, Wrap,
 };
-use ratatui::Frame;
-use ratatui::Terminal;
 
 use tokio::sync::RwLock;
 
-use crate::list::{build_list, sort_items, ListItem, SortField};
-use hzfind::hetzner_auction::{fetch_auctions, HetznerAuction};
+use crate::list::{ListItem, SortField, build_list, sort_items};
+use hzfind::hetzner_auction::{HetznerAuction, fetch_auctions};
+use hzfind::hetzner_cloud::HETZNER_CLOUD_SERVERS;
 
 // ── Colors ───────────────────────────────────────────────────────────────────
 
@@ -51,15 +52,13 @@ const DEFAULT_VAT_RATE: f64 = 20.0;
 const C_BETTER: Color = Color::Rgb(130, 220, 130);
 const C_WORSE: Color = Color::Rgb(220, 130, 130);
 
-// ── CCX33 baseline (Hetzner Cloud, dedicated, excl. VAT, monthly) ──
-const CCX33_PRICE: f64 = 62.99;
-const CCX33_CPU_SCORE: f64 = 14694.0;
-const CCX33_RAM_GB: f64 = 32.0;
-const CCX33_STORAGE_GB: f64 = 240.0;
-const CCX33_CORES: f64 = 4.0;
-const CCX33_CPU_SCORE_PER_EUR: f64 = CCX33_CPU_SCORE / CCX33_PRICE;
-const CCX33_RAM_PER_EUR: f64 = CCX33_RAM_GB / CCX33_PRICE;
-const CCX33_STORAGE_PER_EUR: f64 = CCX33_STORAGE_GB / CCX33_PRICE;
+// ── Cloud baseline helper ──
+/// Returns the first cloud server from the embedded JSON (currently CCX33).
+fn cloud_baseline() -> &'static hzfind::hetzner_cloud::HetznerCloudServer {
+    HETZNER_CLOUD_SERVERS
+        .first()
+        .expect("assets/hetzner_cloud.json must contain at least one server")
+}
 
 // ── Shared data (background-fetch → render bridge) ─────────────────────────
 
@@ -212,16 +211,15 @@ impl App {
     fn open_detail(&mut self) {
         if let Some(item) = self.selected_item() {
             let item_clone = item.clone();
-            self.selected_auction = self
-                .auctions
-                .iter()
-                .find(|a| a.id == item_clone.hz_auction_id)
-                .cloned();
-            if self.selected_auction.is_some() {
-                self.selected_item_data = Some(item_clone);
-                self.detail_scroll = 0;
-                self.mode = Mode::Detail;
-            }
+            self.selected_auction = match item_clone.id {
+                crate::list::ListItemId::HetznerAuctions(auction_id) => {
+                    self.auctions.iter().find(|a| a.id == auction_id).cloned()
+                }
+                _ => None,
+            };
+            self.selected_item_data = Some(item_clone);
+            self.detail_scroll = 0;
+            self.mode = Mode::Detail;
         }
     }
 }
@@ -357,8 +355,7 @@ fn should_close(key: &KeyEvent) -> bool {
 
 fn move_down(key: &KeyEvent, state: &mut TableState, len: usize) {
     if matches!(key.code, event::KeyCode::Down | event::KeyCode::Char('j'))
-        || (key.modifiers.contains(KeyModifiers::CONTROL)
-            && key.code == event::KeyCode::Char('n'))
+        || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == event::KeyCode::Char('n'))
     {
         let next = state.selected().map(|i| i.saturating_add(1)).unwrap_or(0);
         state.select(Some(next.min(len.saturating_sub(1))));
@@ -367,8 +364,7 @@ fn move_down(key: &KeyEvent, state: &mut TableState, len: usize) {
 
 fn move_up(key: &KeyEvent, state: &mut TableState, len: usize) {
     if matches!(key.code, event::KeyCode::Up | event::KeyCode::Char('k'))
-        || (key.modifiers.contains(KeyModifiers::CONTROL)
-            && key.code == event::KeyCode::Char('p'))
+        || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == event::KeyCode::Char('p'))
     {
         let next = state.selected().map(|i| i.saturating_sub(1)).unwrap_or(0);
         state.select(Some(next));
@@ -484,22 +480,19 @@ fn handle_detail_key(key: KeyEvent, app: &mut App) {
     let scroll_step = 3;
 
     if matches!(key.code, event::KeyCode::Down | event::KeyCode::Char('j'))
-        || (key.modifiers.contains(KeyModifiers::CONTROL)
-            && key.code == event::KeyCode::Char('n'))
+        || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == event::KeyCode::Char('n'))
     {
         app.detail_scroll = app.detail_scroll.saturating_add(scroll_step);
     }
     if matches!(key.code, event::KeyCode::Up | event::KeyCode::Char('k'))
-        || (key.modifiers.contains(KeyModifiers::CONTROL)
-            && key.code == event::KeyCode::Char('p'))
+        || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == event::KeyCode::Char('p'))
     {
         app.detail_scroll = app.detail_scroll.saturating_sub(scroll_step);
     }
     if matches!(key.code, event::KeyCode::Char('G')) {
         app.detail_scroll = u16::MAX;
     }
-    if key.modifiers.contains(KeyModifiers::SHIFT)
-        && matches!(key.code, event::KeyCode::Char('G'))
+    if key.modifiers.contains(KeyModifiers::SHIFT) && matches!(key.code, event::KeyCode::Char('G'))
     {
         app.detail_scroll = 0;
     }
@@ -530,26 +523,20 @@ fn handle_detail_key(key: KeyEvent, app: &mut App) {
 
 fn render_loading(f: &mut Frame, dot_frame: usize) {
     let dots = ".".repeat(dot_frame);
-    let loading_text = Line::from(vec![
-        Span::styled(
-            format!(" Fetching Hetzner auction data{dots} "),
-            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
-        ),
-    ]);
+    let loading_text = Line::from(vec![Span::styled(
+        format!(" Fetching Hetzner auction data{dots} "),
+        Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+    )]);
     f.render_widget(Block::default().style(Style::default().bg(C_ROW)), f.area());
     let centered = centered_rect(34, 3, f.area());
     f.render_widget(
-        ratatui::widgets::Paragraph::new(loading_text)
-            .alignment(Alignment::Center),
+        ratatui::widgets::Paragraph::new(loading_text).alignment(Alignment::Center),
         centered,
     );
 }
 
 fn render_error_screen(f: &mut Frame, error: &eyre::Report) {
-    f.render_widget(
-        Block::default().style(Style::default().bg(C_ROW)),
-        f.area(),
-    );
+    f.render_widget(Block::default().style(Style::default().bg(C_ROW)), f.area());
 
     let area = centered_rect(64, 13, f.area());
     f.render_widget(Clear, area);
@@ -557,11 +544,7 @@ fn render_error_screen(f: &mut Frame, error: &eyre::Report) {
     let block = Block::default()
         .title(" Error ")
         .title_alignment(Alignment::Center)
-        .title_style(
-            Style::default()
-                .fg(Color::Red)
-                .add_modifier(Modifier::BOLD),
-        )
+        .title_style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Rgb(180, 60, 60)))
         .style(Style::default().bg(C_DIALOG_BG));
@@ -570,7 +553,7 @@ fn render_error_screen(f: &mut Frame, error: &eyre::Report) {
 
     let chunks = Layout::vertical([
         Constraint::Length(2), // title
-        Constraint::Min(0),   // error chain
+        Constraint::Min(0),    // error chain
         Constraint::Length(1), // spacer
         Constraint::Length(1), // hint
     ])
@@ -578,30 +561,17 @@ fn render_error_screen(f: &mut Frame, error: &eyre::Report) {
 
     let title = Line::from(Span::styled(
         "✕  Failed to fetch Hetzner auction data",
-        Style::default()
-            .fg(Color::Red)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
     ));
-    f.render_widget(
-        ratatui::widgets::Paragraph::new(title),
-        chunks[0],
-    );
+    f.render_widget(ratatui::widgets::Paragraph::new(title), chunks[0]);
 
     let mut error_lines: Vec<Line> = error
         .chain()
         .take(6)
-        .map(|err| {
-            Line::from(Span::styled(
-                err.to_string(),
-                Style::default().fg(C_VALUE),
-            ))
-        })
+        .map(|err| Line::from(Span::styled(err.to_string(), Style::default().fg(C_VALUE))))
         .collect();
     if error.chain().count() > 6 {
-        error_lines.push(Line::from(Span::styled(
-            "  …",
-            Style::default().fg(C_DIM),
-        )));
+        error_lines.push(Line::from(Span::styled("  …", Style::default().fg(C_DIM))));
     }
     f.render_widget(
         ratatui::widgets::Paragraph::new(error_lines).wrap(Wrap { trim: false }),
@@ -646,7 +616,7 @@ fn render_table(f: &mut Frame, app: &mut App) {
     let area = f.area();
     let chunks = Layout::vertical([
         Constraint::Length(2), // header
-        Constraint::Min(0),   // table
+        Constraint::Min(0),    // table
         Constraint::Length(1), // footer
     ])
     .split(area);
@@ -661,9 +631,7 @@ fn render_table(f: &mut Frame, app: &mut App) {
         Span::styled("⟨", Style::default().fg(C_ACCENT)),
         Span::styled(
             " hzfind ",
-            Style::default()
-                .fg(C_ACCENT)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
         ),
         Span::styled("⟩", Style::default().fg(C_ACCENT)),
         Span::raw("  Hetzner Server Auction Finder"),
@@ -697,15 +665,12 @@ fn render_table(f: &mut Frame, app: &mut App) {
     f.render_widget(header_block, chunks[0]);
 
     let header_cols = Layout::horizontal([
-        Constraint::Min(0),       // left side
-        Constraint::Length(28),   // right side: age display
+        Constraint::Min(0),     // left side
+        Constraint::Length(28), // right side: age display
     ])
     .split(header_inner);
 
-    f.render_widget(
-        ratatui::widgets::Paragraph::new(header),
-        header_cols[0],
-    );
+    f.render_widget(ratatui::widgets::Paragraph::new(header), header_cols[0]);
 
     // Right-aligned: last fetched age + live indicator
     let age_secs = app.data_age().as_secs();
@@ -736,8 +701,7 @@ fn render_table(f: &mut Frame, app: &mut App) {
         ));
     }
     f.render_widget(
-        ratatui::widgets::Paragraph::new(Line::from(right_spans))
-            .alignment(Alignment::Right),
+        ratatui::widgets::Paragraph::new(Line::from(right_spans)).alignment(Alignment::Right),
         header_cols[1],
     );
 
@@ -750,22 +714,22 @@ fn render_table(f: &mut Frame, app: &mut App) {
         .unwrap_or(0)
         .max(6) as u16;
     let widths = [
-        Constraint::Length(7),        // ID
-        Constraint::Length(1),   // sep
+        Constraint::Length(12),          // ID
+        Constraint::Length(1),           // sep
         Constraint::Length(max_cpu_len), // CPU
-        Constraint::Length(1),   // sep
-        Constraint::Length(4),   // CPU#
-        Constraint::Length(8),   // Cores
-        Constraint::Length(8),   // RAM
-        Constraint::Length(10),  // Storage
-        Constraint::Length(1),   // sep
-        Constraint::Length(10),  // CPU Sc/€
-        Constraint::Length(10),  // RAM/€
-        Constraint::Length(10),  // Storage/€
-        Constraint::Length(1),   // sep
-        Constraint::Length(10),  // Price
-        Constraint::Length(1),   // sep
-        Constraint::Length(9),   // DC
+        Constraint::Length(1),           // sep
+        Constraint::Length(4),           // CPU#
+        Constraint::Length(8),           // Cores
+        Constraint::Length(8),           // RAM
+        Constraint::Length(10),          // Storage
+        Constraint::Length(1),           // sep
+        Constraint::Length(10),          // CPU Sc/€
+        Constraint::Length(10),          // RAM/€
+        Constraint::Length(10),          // Storage/€
+        Constraint::Length(1),           // sep
+        Constraint::Length(10),          // Price
+        Constraint::Length(1),           // sep
+        Constraint::Length(9),           // DC
     ];
 
     let active_col = match app.sort {
@@ -776,8 +740,22 @@ fn render_table(f: &mut Frame, app: &mut App) {
     let sep_style = Style::default().fg(C_DIM);
     const SEP_COLS: [usize; 5] = [1, 3, 8, 12, 14];
     let header_cells: Vec<Cell> = [
-        "ID", "│", "CPU", "│", "CPU#", "Cores", "RAM", "Storage", "│", "CPU Sc/€", "RAM/€", "Storage/€",
-        "│", "Price", "│", "DC",
+        "ID",
+        "│",
+        "CPU",
+        "│",
+        "CPU#",
+        "Cores",
+        "RAM",
+        "Storage",
+        "│",
+        "CPU Sc/€",
+        "RAM/€",
+        "Storage/€",
+        "│",
+        "Price",
+        "│",
+        "DC",
     ]
     .into_iter()
     .enumerate()
@@ -811,7 +789,7 @@ fn render_table(f: &mut Frame, app: &mut App) {
             let row_style = Style::default().fg(C_VALUE).bg(base_bg);
             let active_style = Style::default().fg(C_ACCENT).bg(base_bg).bold();
             let cells = [
-                Cell::new(item.hz_auction_id.to_string()),
+                Cell::new(item.id.to_string()),
                 Cell::new("│").style(sep_style),
                 Cell::new(item.cpu_name.as_str()),
                 Cell::new("│").style(sep_style),
@@ -819,7 +797,10 @@ fn render_table(f: &mut Frame, app: &mut App) {
                 Cell::new(match (item.p_cores, item.e_cores) {
                     (None, _) => "—".into(),
                     (Some(p), Some(e)) if e > 0 => format!("{p}P+{e}E"),
-                    (Some(_), _) => item.total_cores.map(|c| c.to_string()).unwrap_or_else(|| "—".into()),
+                    (Some(_), _) => item
+                        .total_cores
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "—".into()),
                 }),
                 Cell::new(format!("{} GB", item.ram_size_gb)),
                 Cell::new(storage_str(item.total_storage_gb)),
@@ -833,7 +814,10 @@ fn render_table(f: &mut Frame, app: &mut App) {
                 Cell::new(format!("{:.1}", item.storage_gb_per_eur)),
                 Cell::new("│").style(sep_style),
                 Cell::new(if app.vat_enabled {
-                    format!("€{:.2}", item.price_monthly_eur * (1.0 + app.vat_rate / 100.0))
+                    format!(
+                        "€{:.2}",
+                        item.price_monthly_eur * (1.0 + app.vat_rate / 100.0)
+                    )
                 } else {
                     format!("€{:.2}", item.price_monthly_eur)
                 }),
@@ -856,11 +840,7 @@ fn render_table(f: &mut Frame, app: &mut App) {
                 .collect();
             let mut row = Row::new(cells).style(row_style);
             if i == selected_idx {
-                row = row.style(
-                    Style::default()
-                        .fg(C_HIGHLIGHT_FG)
-                        .bg(C_HIGHLIGHT_BG),
-                );
+                row = row.style(Style::default().fg(C_HIGHLIGHT_FG).bg(C_HIGHLIGHT_BG));
             }
             row
         })
@@ -877,19 +857,14 @@ fn render_table(f: &mut Frame, app: &mut App) {
                 )
                 .bottom_margin(0),
         )
-        .row_highlight_style(
-            Style::default()
-                .fg(C_HIGHLIGHT_FG)
-                .bg(C_HIGHLIGHT_BG),
-        )
+        .row_highlight_style(Style::default().fg(C_HIGHLIGHT_FG).bg(C_HIGHLIGHT_BG))
         .highlight_spacing(HighlightSpacing::Always);
 
-    let mut scrollbar_state = ScrollbarState::new(app.items.len().saturating_sub(1))
-        .position(selected_idx);
+    let mut scrollbar_state =
+        ScrollbarState::new(app.items.len().saturating_sub(1)).position(selected_idx);
     f.render_stateful_widget(table, chunks[1], &mut app.table_state);
     f.render_stateful_widget(
-        Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .thumb_style(Style::default().fg(C_DIM)),
+        Scrollbar::new(ScrollbarOrientation::VerticalRight).thumb_style(Style::default().fg(C_DIM)),
         chunks[1],
         &mut scrollbar_state,
     );
@@ -912,16 +887,11 @@ fn render_table(f: &mut Frame, app: &mut App) {
             count
         )
     };
-    let footer_block = Block::default().style(
-        Style::default()
-            .bg(C_FOOTER_BG)
-            .fg(C_FOOTER_FG),
-    );
+    let footer_block = Block::default().style(Style::default().bg(C_FOOTER_BG).fg(C_FOOTER_FG));
     let footer_inner = footer_block.inner(chunks[2]);
     f.render_widget(footer_block, chunks[2]);
     f.render_widget(
-        ratatui::widgets::Paragraph::new(footer_text)
-            .alignment(Alignment::Center),
+        ratatui::widgets::Paragraph::new(footer_text).alignment(Alignment::Center),
         footer_inner,
     );
 }
@@ -955,11 +925,7 @@ fn render_sort_dialog(f: &mut Frame, app: &mut App) {
             Block::default()
                 .title(" Sort Picker ")
                 .title_alignment(Alignment::Center)
-                .title_style(
-                    Style::default()
-                        .fg(C_ACCENT)
-                        .add_modifier(Modifier::BOLD),
-                )
+                .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(C_DIALOG_BORDER))
                 .style(Style::default().bg(C_DIALOG_BG).fg(C_VALUE)),
@@ -982,11 +948,7 @@ fn render_vat_dialog(f: &mut Frame, app: &mut App) {
     let block = Block::default()
         .title(" VAT Rate ")
         .title_alignment(Alignment::Center)
-        .title_style(
-            Style::default()
-                .fg(C_ACCENT)
-                .add_modifier(Modifier::BOLD),
-        )
+        .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(C_DIALOG_BORDER))
         .style(Style::default().bg(C_DIALOG_BG));
@@ -994,21 +956,17 @@ fn render_vat_dialog(f: &mut Frame, app: &mut App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let lines = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(0),
-    ])
-    .split(inner);
+    let lines = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
 
-    let prompt = Line::from(vec![
-        Span::styled("Enter VAT rate (%): ", Style::default().fg(C_DIM)),
-    ]);
+    let prompt = Line::from(vec![Span::styled(
+        "Enter VAT rate (%): ",
+        Style::default().fg(C_DIM),
+    )]);
     f.render_widget(ratatui::widgets::Paragraph::new(prompt), lines[0]);
 
     let input_with_cursor = format!("{}█", app.vat_input);
     f.render_widget(
-        ratatui::widgets::Paragraph::new(input_with_cursor)
-            .style(Style::default().fg(C_VALUE)),
+        ratatui::widgets::Paragraph::new(input_with_cursor).style(Style::default().fg(C_VALUE)),
         lines[1],
     );
 }
@@ -1016,16 +974,15 @@ fn render_vat_dialog(f: &mut Frame, app: &mut App) {
 fn render_detail(f: &mut Frame, app: &mut App) {
     let area = f.area();
     let chunks = Layout::vertical([
-        Constraint::Min(0),   // detail content
+        Constraint::Min(0),    // detail content
         Constraint::Length(1), // footer
     ])
     .split(area);
 
-    let Some(ref auction) = app.selected_auction else {
+    let Some(ref item) = app.selected_item_data else {
         return;
     };
 
-    let total_storage = auction.hdd_size * auction.hdd_count;
     let section = Style::default().fg(C_SECTION).add_modifier(Modifier::BOLD);
     let label = Style::default().fg(C_DIM).add_modifier(Modifier::BOLD);
     let value = Style::default().fg(C_VALUE);
@@ -1034,54 +991,34 @@ fn render_detail(f: &mut Frame, app: &mut App) {
         Line::from(""),
         Line::from(vec![
             Span::styled("  ", value),
-            Span::styled(&auction.cpu, Style::default().fg(C_ACCENT).bold()),
+            Span::styled(&item.cpu_name, Style::default().fg(C_ACCENT).bold()),
             Span::styled(
-                format!("  × {}", auction.cpu_count),
+                format!("  × {}", item.cpu_count),
                 Style::default().fg(C_DIM),
             ),
         ]),
         detail_line(
             "  Cores",
-            &match auction.cpu_passmark_score() {
-                Some(score) => {
-                    let per_cpu = if score.e_cores > 0 {
-                        format!("{}P + {}E", score.p_cores, score.e_cores)
-                    } else {
-                        format!("{} cores", score.cores)
-                    };
-                    format!("{} ({} × {} CPUs)", score.cores * auction.cpu_count, per_cpu, auction.cpu_count)
+            &match (item.total_cores, item.p_cores, item.e_cores) {
+                (Some(total), Some(p), Some(e)) if e > 0 => {
+                    format!("{total} ({p}P + {e}E)")
                 }
-                None => "—".to_string(),
-            },
-            label,
-            value,
-        ),
-        detail_line(
-            "  Threads",
-            &match auction.cpu_passmark_score() {
-                Some(score) => {
-                    let total = (score.p_threads + score.e_threads) * auction.cpu_count;
-                    if score.e_threads > 0 {
-                        format!("{} ({}P + {}E) × {} CPUs", total, score.p_threads, score.e_threads, auction.cpu_count)
-                    } else {
-                        format!("{} ({}P × {} CPUs)", total, score.p_threads, auction.cpu_count)
-                    }
-                }
-                None => "—".to_string(),
+                (Some(total), _, _) => format!("{total}"),
+                _ => "—".to_string(),
             },
             label,
             value,
         ),
         detail_line(
             "  PassMark",
-            &match auction.cpu_passmark_score() {
-                Some(score) => format!(
-                    "{} ({} per CPU × {} CPUs)",
-                    format_number(score.cpumark as u64 * auction.cpu_count as u64),
-                    format_number(score.cpumark as u64),
-                    auction.cpu_count
+            &match (item.individual_cpu_score, item.total_cpu_score, item.cpu_count) {
+                (Some(indiv), Some(total), count) if count > 1 => format!(
+                    "{} ({} per CPU × {count} CPUs)",
+                    format_number(total as u64),
+                    format_number(indiv as u64),
                 ),
-                None => "—".to_string(),
+                (Some(_), Some(total), 1) => format_number(total as u64),
+                _ => "—".to_string(),
             },
             label,
             value,
@@ -1092,89 +1029,131 @@ fn render_detail(f: &mut Frame, app: &mut App) {
             Span::styled("Server Info", section),
             Span::styled(" ──────────────────────", label),
         ]),
-        detail_line("  ID", &auction.id.to_string(), label, value),
-        detail_line("  RAM", &format!("{} GB", auction.ram_size), label, value),
-        detail_line(
-            "  Storage",
-            &format!(
-                "{} ({} × {} GB)",
-                storage_str(total_storage), auction.hdd_count, auction.hdd_size
-            ),
-            label,
-            value,
-        ),
-        Line::from(""),
-        Line::from(vec![
+        detail_line("  ID", &item.id.to_string(), label, value),
+        detail_line("  RAM", &format!("{} GB", item.ram_size_gb), label, value),
+    ];
+
+    let storage_text = if item.total_storage_gb > 0 {
+        storage_str(item.total_storage_gb)
+    } else {
+        "—".to_string()
+    };
+    lines.push(detail_line(
+        "  Storage",
+        &storage_text,
+        label,
+        value,
+    ));
+
+    // ── Auction-specific pricing section ──
+    if let Some(ref auction) = app.selected_auction {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
             Span::styled("  ", value),
             Span::styled("Pricing", section),
             Span::styled(" ──────────────────────", label),
-        ]),
-        detail_line(
+        ]));
+        lines.push(detail_line(
             "  Monthly",
             &if app.vat_enabled {
-                format!("€{:.2} (VAT incl.)", auction.price * (1.0 + app.vat_rate / 100.0))
+                format!(
+                    "€{:.2} (VAT incl.)",
+                    auction.price * (1.0 + app.vat_rate / 100.0)
+                )
             } else {
                 format!("€{:.2}", auction.price)
             },
             label,
             value,
-        ),
-        detail_line(
+        ));
+        lines.push(detail_line(
             "  Setup",
             &if app.vat_enabled {
-                format!("€{:.2} (VAT incl.)", auction.setup_price * (1.0 + app.vat_rate / 100.0))
+                format!(
+                    "€{:.2} (VAT incl.)",
+                    auction.setup_price * (1.0 + app.vat_rate / 100.0)
+                )
             } else {
                 format!("€{:.2}", auction.setup_price)
             },
             label,
             value,
-        ),
-        detail_line(
+        ));
+        lines.push(detail_line(
             "  Hourly",
             &if app.vat_enabled {
-                format!("€{:.4} (VAT incl.)", auction.hourly_price * (1.0 + app.vat_rate / 100.0))
+                format!(
+                    "€{:.4} (VAT incl.)",
+                    auction.hourly_price * (1.0 + app.vat_rate / 100.0)
+                )
             } else {
                 format!("€{:.4}", auction.hourly_price)
             },
             label,
             value,
-        ),
-        detail_line(
+        ));
+        lines.push(detail_line(
             "  IP (monthly)",
             &if app.vat_enabled {
-                format!("€{:.2} (VAT incl.)", auction.ip_price.monthly * (1.0 + app.vat_rate / 100.0))
+                format!(
+                    "€{:.2} (VAT incl.)",
+                    auction.ip_price.monthly * (1.0 + app.vat_rate / 100.0)
+                )
             } else {
                 format!("€{:.2}", auction.ip_price.monthly)
             },
             label,
             value,
-        ),
-        detail_line(
+        ));
+        lines.push(detail_line(
             "  Total Monthly",
             &if app.vat_enabled {
-                let total = (auction.price + auction.ip_price.monthly) * (1.0 + app.vat_rate / 100.0);
+                let total =
+                    (auction.price + auction.ip_price.monthly) * (1.0 + app.vat_rate / 100.0);
                 format!("€{:.2} (VAT incl.)", total)
             } else {
                 format!("€{:.2}", auction.price + auction.ip_price.monthly)
             },
             label,
             Style::default().fg(C_PRICE),
-        ),
-        detail_line(
+        ));
+        lines.push(detail_line(
             "  Fixed Price",
             if auction.fixed_price { "Yes" } else { "No" },
             label,
             value,
-        ),
-    ];
+        ));
+    } else {
+        // Cloud server — show the single monthly price
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("  ", value),
+            Span::styled("Pricing", section),
+            Span::styled(" ──────────────────────", label),
+        ]));
+        lines.push(detail_line(
+            "  Monthly",
+            &if app.vat_enabled {
+                format!(
+                    "€{:.2} (VAT incl.)",
+                    item.price_monthly_eur * (1.0 + app.vat_rate / 100.0)
+                )
+            } else {
+                format!("€{:.2}", item.price_monthly_eur)
+            },
+            label,
+            Style::default().fg(C_PRICE),
+        ));
+    }
 
-    // ── vs CCX33 comparison ──
+    // ── vs cloud baseline comparison ──
     if let Some(ref item) = app.selected_item_data {
+        let bl = cloud_baseline();
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled("  ", value),
             Span::styled(
-                format!("vs CCX33 (€{CCX33_PRICE:.2}/mo)"),
+                format!("vs {} (€{:.2}/mo)", bl.name, bl.price_monthly_eur),
                 section,
             ),
             Span::styled(" ───────────────", label),
@@ -1182,140 +1161,136 @@ fn render_detail(f: &mut Frame, app: &mut App) {
         lines.push(comparison_line(
             "Cores",
             item.total_cores.map(|c| c as f64),
-            CCX33_CORES,
+            Some(bl.cores as f64),
             label,
             |v| format!("{}", v as u32),
         ));
         lines.push(comparison_line(
             "RAM",
             Some(item.ram_size_gb as f64),
-            CCX33_RAM_GB,
+            Some(bl.ram_gb as f64),
             label,
             |v| format!("{} GB", v as u32),
         ));
         lines.push(comparison_line(
             "Storage",
             Some(item.total_storage_gb as f64),
-            CCX33_STORAGE_GB,
+            Some(bl.storage_gb as f64),
             label,
             |v| storage_str(v as u32),
         ));
         lines.push(comparison_line(
             "CPU Sc/€",
             item.cpu_score_per_eur,
-            CCX33_CPU_SCORE_PER_EUR,
+            Some(bl.cpu_score_per_eur()),
             label,
             |v| format!("{v:.1}"),
         ));
         lines.push(comparison_line(
             "RAM/€",
             Some(item.ram_gb_per_eur),
-            CCX33_RAM_PER_EUR,
+            Some(bl.ram_per_eur()),
             label,
             |v| format!("{v:.1}"),
         ));
         lines.push(comparison_line(
             "Storage/€",
             Some(item.storage_gb_per_eur),
-            CCX33_STORAGE_PER_EUR,
+            Some(bl.storage_per_eur()),
             label,
             |v| format!("{v:.1}"),
         ));
     }
 
-    let more_lines: Vec<Line> = vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("  ", value),
-            Span::styled("Location & Network", section),
-            Span::styled(" ──────────────────────", label),
-        ]),
-        detail_line("  Datacenter", &auction.datacenter, label, value),
-        detail_line("  Traffic", &auction.traffic, label, value),
-        detail_line(
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  ", value),
+        Span::styled("Location & Network", section),
+        Span::styled(" ──────────────────────", label),
+    ]));
+    lines.push(detail_line("  Datacenter", &item.hz_datacenter_location, label, value));
+
+    if let Some(ref auction) = app.selected_auction {
+        lines.push(detail_line("  Traffic", &auction.traffic, label, value));
+        lines.push(detail_line(
             "  Bandwidth",
             &format!("{} Gbit/s", auction.bandwidth),
             label,
             value,
-        ),
-        Line::from(""),
-        Line::from(vec![
+        ));
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
             Span::styled("  ", value),
             Span::styled("Properties", section),
             Span::styled(" ──────────────────────", label),
-        ]),
-        detail_line(
+        ]));
+        lines.push(detail_line(
             "  ECC RAM",
             if auction.is_ecc { "Yes" } else { "No" },
             label,
             value,
-        ),
-        detail_line(
+        ));
+        lines.push(detail_line(
             "  High IO",
             if auction.is_highio { "Yes" } else { "No" },
             label,
             value,
-        ),
-    ];
-    lines.extend(more_lines);
-
-    if !auction.specials.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("  ", value),
-            Span::styled("Specials", section),
-            Span::styled(" ──────────────────────", label),
-        ]));
-        for s in &auction.specials {
-            lines.push(Line::from(vec![
-                Span::raw("      "),
-                Span::raw(format!("• {s}")),
-            ]));
-        }
+        ));
     }
 
-    if !auction.description.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("  ", value),
-            Span::styled("Description", section),
-            Span::styled(" ──────────────────────", label),
-        ]));
-        for d in &auction.description {
+    if let Some(ref auction) = app.selected_auction {
+        if !auction.specials.is_empty() {
+            lines.push(Line::from(""));
             lines.push(Line::from(vec![
-                Span::raw("      "),
-                Span::raw(d.as_str()),
+                Span::styled("  ", value),
+                Span::styled("Specials", section),
+                Span::styled(" ──────────────────────", label),
             ]));
+            for s in &auction.specials {
+                lines.push(Line::from(vec![
+                    Span::raw("      "),
+                    Span::raw(format!("• {s}")),
+                ]));
+            }
         }
-    }
 
-    if !auction.information.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("  ", value),
-            Span::styled("Information", section),
-            Span::styled(" ──────────────────────", label),
-        ]));
-        for i in &auction.information {
+        if !auction.description.is_empty() {
+            lines.push(Line::from(""));
             lines.push(Line::from(vec![
-                Span::raw("      "),
-                Span::raw(i.as_str()),
+                Span::styled("  ", value),
+                Span::styled("Description", section),
+                Span::styled(" ──────────────────────", label),
             ]));
+            for d in &auction.description {
+                lines.push(Line::from(vec![Span::raw("      "), Span::raw(d.as_str())]));
+            }
         }
-    }
 
-    if !auction.dist.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("  ", value),
-            Span::styled("Available Distros", section),
-            Span::styled(" ──────────────────────", label),
-        ]));
-        for d in &auction.dist {
+        if !auction.information.is_empty() {
+            lines.push(Line::from(""));
             lines.push(Line::from(vec![
-                Span::raw("      "),
-                Span::raw(format!("• {d}")),
+                Span::styled("  ", value),
+                Span::styled("Information", section),
+                Span::styled(" ──────────────────────", label),
             ]));
+            for i in &auction.information {
+                lines.push(Line::from(vec![Span::raw("      "), Span::raw(i.as_str())]));
+            }
+        }
+
+        if !auction.dist.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("  ", value),
+                Span::styled("Available Distros", section),
+                Span::styled(" ──────────────────────", label),
+            ]));
+            for d in &auction.dist {
+                lines.push(Line::from(vec![
+                    Span::raw("      "),
+                    Span::raw(format!("• {d}")),
+                ]));
+            }
         }
     }
 
@@ -1324,11 +1299,7 @@ fn render_detail(f: &mut Frame, app: &mut App) {
     let block = Block::default()
         .title(" Server Details ")
         .title_alignment(Alignment::Center)
-        .title_style(
-            Style::default()
-                .fg(C_ACCENT)
-                .add_modifier(Modifier::BOLD),
-        )
+        .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(C_DIALOG_BORDER))
         .style(Style::default().bg(C_DIALOG_BG));
@@ -1346,29 +1317,24 @@ fn render_detail(f: &mut Frame, app: &mut App) {
             .scroll((app.detail_scroll, 0)),
         inner,
     );
-    let mut scrollbar_state = ScrollbarState::new(content_height)
-        .position(app.detail_scroll as usize);
+    let mut scrollbar_state =
+        ScrollbarState::new(content_height).position(app.detail_scroll as usize);
     f.render_stateful_widget(
-        Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .thumb_style(Style::default().fg(C_DIM)),
+        Scrollbar::new(ScrollbarOrientation::VerticalRight).thumb_style(Style::default().fg(C_DIM)),
         inner,
         &mut scrollbar_state,
     );
 
     // ── Footer ───────────────────────────────────────────────────────────
-    let footer_block = Block::default().style(
-        Style::default().bg(C_FOOTER_BG).fg(C_FOOTER_FG),
-    );
+    let footer_block = Block::default().style(Style::default().bg(C_FOOTER_BG).fg(C_FOOTER_FG));
     let footer_inner = footer_block.inner(chunks[1]);
     f.render_widget(footer_block, chunks[1]);
     f.render_widget(
-        ratatui::widgets::Paragraph::new(
-            if app.vat_enabled {
-                " ↑↓ scroll │ v toggle VAT │ t VAT rate │ o open browser │ q/Esc back "
-            } else {
-                " ↑↓ scroll │ v toggle VAT │ o open browser │ q/Esc back "
-            },
-        )
+        ratatui::widgets::Paragraph::new(if app.vat_enabled {
+            " ↑↓ scroll │ v toggle VAT │ t VAT rate │ o open browser │ q/Esc back "
+        } else {
+            " ↑↓ scroll │ v toggle VAT │ o open browser │ q/Esc back "
+        })
         .alignment(Alignment::Center),
         footer_inner,
     );
@@ -1381,46 +1347,35 @@ fn format_number(n: u64) -> String {
 fn comparison_line(
     label: &str,
     server_val: Option<f64>,
-    ccx33_val: f64,
+    baseline_val: Option<f64>,
     label_style: Style,
     fmt: impl Fn(f64) -> String,
 ) -> Line<'static> {
     let padded_label = format!("    {label:<12}");
-    match server_val {
-        Some(sv) => {
-            let pct = (sv - ccx33_val) / ccx33_val * 100.0;
+    match (server_val, baseline_val) {
+        (Some(sv), Some(bv)) => {
+            let pct = (sv - bv) / bv * 100.0;
             let pct_color = if pct >= 0.0 { C_BETTER } else { C_WORSE };
             let sign = if pct >= 0.0 { "+" } else { "" };
             Line::from(vec![
                 Span::styled(padded_label, label_style),
-                Span::styled(
-                    format!("{:>8}", fmt(sv)),
-                    Style::default().fg(C_VALUE),
-                ),
+                Span::styled(format!("{:>8}", fmt(sv)), Style::default().fg(C_VALUE)),
                 Span::styled(" vs ", Style::default().fg(C_DIM)),
-                Span::styled(
-                    format!("{:<8}", fmt(ccx33_val)),
-                    Style::default().fg(C_DIM),
-                ),
+                Span::styled(format!("{:<8}", fmt(bv)), Style::default().fg(C_DIM)),
                 Span::styled(
                     format!("({sign}{pct:.1}%)"),
                     Style::default().fg(pct_color).add_modifier(Modifier::BOLD),
                 ),
             ])
         }
-        None => Line::from(vec![
+        _ => Line::from(vec![
             Span::styled(padded_label, label_style),
             Span::styled("       —", Style::default().fg(C_DIM)),
         ]),
     }
 }
 
-fn detail_line(
-    lbl: &str,
-    val: &str,
-    label_style: Style,
-    value_style: Style,
-) -> Line<'static> {
+fn detail_line(lbl: &str, val: &str, label_style: Style, value_style: Style) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("{lbl}: "), label_style),
         Span::styled(val.to_string(), value_style),

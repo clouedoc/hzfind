@@ -3,6 +3,7 @@ use clap::ValueEnum;
 use serde::Serialize;
 
 use hzfind::hetzner_auction::HetznerAuction;
+use hzfind::hetzner_cloud::HETZNER_CLOUD_SERVERS;
 use hzfind::passmark::PassmarkScore;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -13,9 +14,27 @@ pub enum SortField {
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
+pub enum ListItemId {
+    HetznerAuctions(u32),
+    HetznerCloud(String),
+    #[default]
+    None,
+}
+
+impl std::fmt::Display for ListItemId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ListItemId::HetznerAuctions(id) => write!(f, "SB:{id}"),
+            ListItemId::HetznerCloud(name) => write!(f, "CLOUD:{name}"),
+            ListItemId::None => write!(f, "—"),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Serialize)]
 pub struct ListItem {
     /// Auction ID
-    pub hz_auction_id: u32,
+    pub id: ListItemId,
     /// CPU model name (e.g. "AMD Ryzen 5 3600")
     pub cpu_name: String,
     /// Number of CPUs
@@ -47,7 +66,7 @@ pub struct ListItem {
 }
 
 pub fn build_list(auctions: &[HetznerAuction]) -> Vec<ListItem> {
-    auctions
+    let mut items: Vec<ListItem> = auctions
         .iter()
         .map(|auction| {
             let score: Option<&PassmarkScore> = auction.cpu_passmark_score();
@@ -61,7 +80,7 @@ pub fn build_list(auctions: &[HetznerAuction]) -> Vec<ListItem> {
             let cpu_score_per_eur = total_cpu_score.map(|s| s as f64 / price_monthly_eur);
 
             ListItem {
-                hz_auction_id: auction.id,
+                id: ListItemId::HetznerAuctions(auction.id),
                 cpu_name: auction.cpu.clone(),
                 cpu_count: auction.cpu_count,
                 ram_size_gb: auction.ram_size,
@@ -78,7 +97,30 @@ pub fn build_list(auctions: &[HetznerAuction]) -> Vec<ListItem> {
                 hz_datacenter_location: auction.datacenter.clone(),
             }
         })
-        .collect()
+        .collect();
+
+    // Append Hetzner Cloud servers as ListItems so they appear in listings.
+    for cloud in HETZNER_CLOUD_SERVERS.iter() {
+        items.push(ListItem {
+            id: ListItemId::HetznerCloud(cloud.name.clone()),
+            cpu_name: cloud.cpu_name.clone(),
+            cpu_count: 1,
+            ram_size_gb: cloud.ram_gb,
+            total_storage_gb: cloud.storage_gb,
+            total_cores: Some(cloud.cores),
+            p_cores: Some(cloud.cores),
+            e_cores: None,
+            individual_cpu_score: Some(cloud.cpumark),
+            total_cpu_score: Some(cloud.cpumark),
+            price_monthly_eur: cloud.price_monthly_eur,
+            cpu_score_per_eur: Some(cloud.cpu_score_per_eur()),
+            storage_gb_per_eur: cloud.storage_per_eur(),
+            ram_gb_per_eur: cloud.ram_per_eur(),
+            hz_datacenter_location: cloud.datacenter_location.clone(),
+        });
+    }
+
+    items
 }
 
 pub fn sort_items(items: &mut [ListItem], field: SortField) {

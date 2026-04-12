@@ -1,0 +1,13 @@
+[
+  {
+    "name": "CCX33",
+    "cpu_name": "AMD EPYC-Milan",
+    "ram_gb": 32,
+    "storage_gb": 240,
+    "cores": 4,
+    "threads": 8,
+    "cpumark": 14698,
+    "price_monthly_eur": 62.99,
+    "datacenter_location": "HEL1"
+  }
+]
