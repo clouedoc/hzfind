@@ -76,6 +76,7 @@ enum Mode {
     SortDialog,
     Detail,
     VatDialog,
+    Search,
 }
 
 struct App {
@@ -93,6 +94,8 @@ struct App {
     vat_rate: f64,
     vat_input: String,
     vat_dialog_parent: Mode,
+    search_query: String,
+    search_no_match: bool,
     live: bool,
     last_fetched: Instant,
     last_fetch_failed: bool,
@@ -129,6 +132,8 @@ impl App {
             vat_rate: DEFAULT_VAT_RATE,
             vat_input: String::new(),
             vat_dialog_parent: Mode::Table,
+            search_query: String::new(),
+            search_no_match: false,
             live: false,
             last_fetched,
             last_fetch_failed: false,
@@ -220,6 +225,45 @@ impl App {
             self.selected_item_data = Some(item_clone);
             self.detail_scroll = 0;
             self.mode = Mode::Detail;
+        }
+    }
+
+    /// Jump the table cursor to the best fuzzy match for the current search query.
+    fn jump_to_search_match(&mut self) {
+        let query = &self.search_query;
+        if query.is_empty() {
+            self.search_no_match = false;
+            return;
+        }
+
+        let best = self
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, item)| {
+                let id_str = item.id.to_string();
+                let fields = [&*id_str, &*item.cpu_name, &*item.hz_datacenter_location];
+                let best_score = fields
+                    .iter()
+                    .filter_map(|f| fuzzy_score(query, f))
+                    .fold(f64::NEG_INFINITY, f64::max);
+                if best_score == f64::NEG_INFINITY {
+                    None
+                } else {
+                    Some((i, best_score))
+                }
+            })
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .map(|(i, _)| i);
+
+        match best {
+            Some(idx) => {
+                self.table_state.select(Some(idx));
+                self.search_no_match = false;
+            }
+            None => {
+                self.search_no_match = true;
+            }
         }
     }
 }
@@ -330,6 +374,7 @@ pub async fn run() -> Result<()> {
                             Mode::SortDialog => handle_sort_dialog_key(key, &mut app),
                             Mode::Detail => handle_detail_key(key, &mut app),
                             Mode::VatDialog => handle_vat_dialog_key(key, &mut app),
+                            Mode::Search => handle_search_key(key, &mut app),
                         }
                         if prev_mode == Mode::Table && (should_quit(&key) || key.code == event::KeyCode::Esc) {
                             break;
@@ -377,6 +422,13 @@ fn move_up(key: &KeyEvent, state: &mut TableState, len: usize) {
 fn handle_table_key(key: KeyEvent, app: &mut App) {
     move_down(&key, &mut app.table_state, app.items.len());
     move_up(&key, &mut app.table_state, app.items.len());
+
+    if key.code == event::KeyCode::Char('/') {
+        app.search_query.clear();
+        app.search_no_match = false;
+        app.mode = Mode::Search;
+        return;
+    }
 
     if key.code == event::KeyCode::Char('s') {
         app.sort_state.select(Some(match app.sort {
@@ -449,6 +501,31 @@ fn handle_sort_dialog_key(key: KeyEvent, app: &mut App) {
 
     if should_close(&key) {
         app.mode = Mode::Table;
+    }
+}
+
+fn handle_search_key(key: KeyEvent, app: &mut App) {
+    match key.code {
+        event::KeyCode::Char(c) => {
+            app.search_query.push(c);
+            app.jump_to_search_match();
+        }
+        event::KeyCode::Backspace => {
+            app.search_query.pop();
+            app.search_no_match = false;
+            if !app.search_query.is_empty() {
+                app.jump_to_search_match();
+            }
+        }
+        event::KeyCode::Enter => {
+            app.mode = Mode::Table;
+        }
+        _ if should_close(&key) => {
+            app.search_query.clear();
+            app.search_no_match = false;
+            app.mode = Mode::Table;
+        }
+        _ => {}
     }
 }
 
@@ -590,7 +667,7 @@ fn render_error_screen(f: &mut Frame, error: &eyre::Report) {
 
 fn render(f: &mut Frame, app: &mut App) {
     let bg = match app.mode {
-        Mode::Table | Mode::SortDialog | Mode::VatDialog => C_ROW,
+        Mode::Table | Mode::SortDialog | Mode::VatDialog | Mode::Search => C_ROW,
         Mode::Detail => C_DIALOG_BG,
     };
     f.render_widget(Block::default().style(Style::default().bg(bg)), f.area());
@@ -608,6 +685,10 @@ fn render(f: &mut Frame, app: &mut App) {
                 _ => render_table(f, app),
             }
             render_vat_dialog(f, app);
+        }
+        Mode::Search => {
+            render_table(f, app);
+            render_search_dialog(f, app);
         }
     }
 }
@@ -878,12 +959,12 @@ fn render_table(f: &mut Frame, app: &mut App) {
     };
     let footer_text = if app.vat_enabled {
         format!(
-            " {} servers │ ↑↓ navigate │ s sort │ v toggle VAT │ t VAT rate │ Enter details │{live_tag} │ q/Esc quit ",
+            " {} servers │ ↑↓ navigate │ / search │ s sort │ v toggle VAT │ t VAT rate │ Enter details │{live_tag} │ q/Esc quit ",
             count
         )
     } else {
         format!(
-            " {} servers │ ↑↓ navigate │ s sort │ Enter details │{live_tag} │ q/Esc quit ",
+            " {} servers │ ↑↓ navigate │ / search │ s sort │ Enter details │{live_tag} │ q/Esc quit ",
             count
         )
     };
@@ -1394,4 +1475,103 @@ fn centered_rect(width: u16, height: u16, r: Rect) -> Rect {
     let x = r.width.saturating_sub(width).saturating_div(2);
     let y = r.height.saturating_sub(height).saturating_div(2);
     Rect::new(x, y, width.min(r.width), height.min(r.height))
+}
+
+/// Fuzzy-match scoring: returns `Some(score)` when *query* is a subsequence
+/// of *target* (case-insensitive). Higher score = better match.
+fn fuzzy_score(query: &str, target: &str) -> Option<f64> {
+    let q = query.to_lowercase();
+    let t = target.to_lowercase();
+    if q.is_empty() {
+        return Some(f64::MAX);
+    }
+
+    let q_chars: Vec<char> = q.chars().collect();
+    let t_chars: Vec<char> = t.chars().collect();
+
+    if q_chars.len() > t_chars.len() {
+        return None;
+    }
+
+    let mut qi = 0;
+    let mut score = 0.0_f64;
+    let mut last_match_pos = 0;
+
+    for (ti, &tc) in t_chars.iter().enumerate() {
+        if qi >= q_chars.len() {
+            break;
+        }
+        if tc == q_chars[qi] {
+            if ti == 0 {
+                score += 10.0;
+            }
+            if ti > 0 {
+                let prev = t_chars[ti - 1];
+                if prev == ' ' || prev == '_' || prev == '-' {
+                    score += 5.0;
+                }
+            }
+            if qi > 0 {
+                let gap = ti - last_match_pos;
+                score -= gap as f64 * 0.5;
+            }
+            last_match_pos = ti;
+            qi += 1;
+        }
+    }
+
+    if qi == q_chars.len() {
+        Some(score)
+    } else {
+        None
+    }
+}
+
+fn render_search_dialog(f: &mut Frame, app: &mut App) {
+    let area = centered_rect(44, 7, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Search ")
+        .title_alignment(Alignment::Center)
+        .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(C_DIALOG_BORDER))
+        .style(Style::default().bg(C_DIALOG_BG));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let lines = Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Length(1)])
+        .split(inner);
+
+    let prompt = Line::from(vec![Span::styled(
+        "Search (ID, CPU, location):",
+        Style::default().fg(C_DIM),
+    )]);
+    f.render_widget(ratatui::widgets::Paragraph::new(prompt), lines[0]);
+
+    let input_with_cursor = format!("{}█", app.search_query);
+    f.render_widget(
+        ratatui::widgets::Paragraph::new(input_with_cursor).style(Style::default().fg(C_VALUE)),
+        lines[1],
+    );
+
+    let status = if app.search_no_match {
+        Line::from(Span::styled(
+            "No match found",
+            Style::default().fg(C_WORSE),
+        ))
+    } else if app.search_query.is_empty() {
+        Line::from(Span::styled(
+            "Type to search…",
+            Style::default().fg(C_DIM),
+        ))
+    } else {
+        Line::from(Span::styled(
+            "Match found",
+            Style::default().fg(C_BETTER),
+        ))
+    };
+    f.render_widget(ratatui::widgets::Paragraph::new(status), lines[2]);
 }
