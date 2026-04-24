@@ -6,11 +6,11 @@ Ships with the [PassMark](https://www.cpubenchmark.net/) CPU benchmark database 
 
 Hetzner auction data is fetched live. Prices are **inclusive of VAT**. VAT calculation can be disabled by pressing `v` and the rate can be configured by pressing `t`.
 
-## Screenshots
+[![Terminal Trove Tool of The Week](https://cdn.terminaltrove.com/media/badges/tool_of_the_week/svg/terminal_trove_tool_of_the_week_gold_on_black_bg.svg)](https://terminaltrove.com/)
 
-![List view](screenshots/list.jpg)
-![Sort picker](screenshots/sort.jpg)
-![Details view](screenshots/details.jpg)
+## Demo
+
+![hzfind demo](assets/hzfind-demo.gif)
 
 ## Installation
 
