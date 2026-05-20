@@ -74,11 +74,11 @@ fn parse_scores(json: &str) -> Result<Vec<PassmarkScore>> {
                 e_cores,
                 e_threads,
                 name: cpu_version_regex
-                .replace(
-                    &freq_regexp.replace(&raw.name, ""),
-                    "${cpu_name}v${version}",
-                )
-                .to_string(),
+                    .replace(
+                        &freq_regexp.replace(&raw.name, ""),
+                        "${cpu_name}v${version}",
+                    )
+                    .to_string(),
             }
         })
         .collect();

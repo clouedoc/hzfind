@@ -77,15 +77,66 @@ enum Mode {
     Detail,
     VatDialog,
     Search,
+    FilterDialog,
+    FilterInput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum FilterInputKind {
+    MaxPrice,
+    MinCpuScore,
+    MinCoreCount,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+struct Filters {
+    max_price_eur: Option<f64>,
+    min_cpu_score: Option<u32>,
+    min_core_count: Option<u32>,
+}
+
+impl Filters {
+    fn is_active(&self) -> bool {
+        self.max_price_eur.is_some()
+            || self.min_cpu_score.is_some()
+            || self.min_core_count.is_some()
+    }
+
+    fn matches(&self, item: &ListItem, vat_enabled: bool, vat_rate: f64) -> bool {
+        self.max_price_eur.is_none_or(|max_price| {
+            item_display_price_eur(item, vat_enabled, vat_rate) <= max_price
+        }) && self
+            .min_cpu_score
+            .is_none_or(|min_score| item.total_cpu_score.is_some_and(|score| score >= min_score))
+            && self
+                .min_core_count
+                .is_none_or(|min_cores| item.total_cores.is_some_and(|cores| cores >= min_cores))
+    }
+
+    fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(max_price) = self.max_price_eur {
+            parts.push(format!("price ≤ €{max_price:.2}"));
+        }
+        if let Some(min_score) = self.min_cpu_score {
+            parts.push(format!("score ≥ {}", format_number(min_score as u64)));
+        }
+        if let Some(min_cores) = self.min_core_count {
+            parts.push(format!("cores ≥ {min_cores}"));
+        }
+        parts.join(", ")
+    }
 }
 
 struct App {
+    all_items: Vec<ListItem>,
     items: Vec<ListItem>,
     auctions: Vec<HetznerAuction>,
     sort: SortField,
     mode: Mode,
     table_state: TableState,
     sort_state: TableState,
+    filter_state: TableState,
     selected_auction: Option<HetznerAuction>,
     selected_item_data: Option<ListItem>,
     sort_names: Vec<&'static str>,
@@ -96,6 +147,10 @@ struct App {
     vat_dialog_parent: Mode,
     search_query: String,
     search_no_match: bool,
+    filters: Filters,
+    filter_input: String,
+    filter_input_kind: FilterInputKind,
+    filter_input_error: bool,
     live: bool,
     last_fetched: Instant,
     last_fetch_failed: bool,
@@ -109,7 +164,7 @@ impl App {
     fn new(mut items: Vec<ListItem>, auctions: Vec<HetznerAuction>) -> Self {
         sort_items(&mut items, SortField::Cpu);
         let mut table_state = TableState::default();
-        table_state.select(Some(0));
+        table_state.select((!items.is_empty()).then_some(0));
         let last_fetched = Instant::now();
         let snapshot = Arc::new(SharedData {
             items: items.clone(),
@@ -118,12 +173,14 @@ impl App {
         });
         let shared = Arc::new(RwLock::new(snapshot.clone()));
         Self {
+            all_items: items.clone(),
             items,
             auctions,
             sort: SortField::Cpu,
             mode: Mode::Table,
             table_state,
             sort_state: TableState::default().with_selected(0),
+            filter_state: TableState::default().with_selected(0),
             selected_auction: None,
             selected_item_data: None,
             sort_names: vec!["CPU score/€", "RAM/€", "Storage/€"],
@@ -134,6 +191,10 @@ impl App {
             vat_dialog_parent: Mode::Table,
             search_query: String::new(),
             search_no_match: false,
+            filters: Filters::default(),
+            filter_input: String::new(),
+            filter_input_kind: FilterInputKind::MaxPrice,
+            filter_input_error: false,
             live: false,
             last_fetched,
             last_fetch_failed: false,
@@ -149,17 +210,18 @@ impl App {
         if self.fetch_failed_flag.swap(false, Ordering::Relaxed) {
             self.last_fetch_failed = true;
         }
-        if let Ok(guard) = self.shared.try_read()
-            && !Arc::ptr_eq(&self.current_snapshot, &guard)
-        {
-            self.current_snapshot = Arc::clone(&guard);
-            let selected_id = self.table_state.selected();
-            let mut new_items = self.current_snapshot.items.clone();
-            sort_items(&mut new_items, self.sort);
-            self.items = new_items;
+        let snapshot = self
+            .shared
+            .try_read()
+            .ok()
+            .filter(|guard| !Arc::ptr_eq(&self.current_snapshot, guard))
+            .map(|guard| Arc::clone(&guard));
+        if let Some(snapshot) = snapshot {
+            self.current_snapshot = snapshot;
+            let selected_idx = self.table_state.selected();
+            self.all_items = self.current_snapshot.items.clone();
             self.auctions = self.current_snapshot.auctions.clone();
-            self.table_state
-                .select(selected_id.map(|i| i.min(self.items.len().saturating_sub(1))));
+            self.rebuild_items(selected_idx);
             self.last_fetched = self.current_snapshot.last_fetched;
             self.last_fetch_failed = false;
         }
@@ -204,9 +266,89 @@ impl App {
         self.last_fetched.elapsed()
     }
 
+    fn rebuild_items(&mut self, selected_idx: Option<usize>) {
+        let mut items: Vec<ListItem> = self
+            .all_items
+            .iter()
+            .filter(|item| self.filters.matches(item, self.vat_enabled, self.vat_rate))
+            .cloned()
+            .collect();
+        sort_items(&mut items, self.sort);
+        self.items = items;
+        self.table_state.select(match self.items.len() {
+            0 => None,
+            len => Some(selected_idx.unwrap_or(0).min(len - 1)),
+        });
+    }
+
     fn apply_sort(&mut self) {
-        sort_items(&mut self.items, self.sort);
-        self.table_state.select(Some(0));
+        self.rebuild_items(Some(0));
+    }
+
+    fn clear_filters(&mut self) {
+        self.filters = Filters::default();
+        self.rebuild_items(Some(0));
+    }
+
+    fn open_filter_input(&mut self, kind: FilterInputKind) {
+        self.filter_input_kind = kind;
+        self.filter_input = match kind {
+            FilterInputKind::MaxPrice => self
+                .filters
+                .max_price_eur
+                .map(|value| format!("{value:.2}"))
+                .unwrap_or_default(),
+            FilterInputKind::MinCpuScore => self
+                .filters
+                .min_cpu_score
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            FilterInputKind::MinCoreCount => self
+                .filters
+                .min_core_count
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        };
+        self.filter_input_error = false;
+        self.mode = Mode::FilterInput;
+    }
+
+    fn apply_filter_input(&mut self) -> bool {
+        let input = self.filter_input.trim();
+        match self.filter_input_kind {
+            FilterInputKind::MaxPrice => {
+                if input.is_empty() {
+                    self.filters.max_price_eur = None;
+                } else if let Ok(value) = input.parse::<f64>() {
+                    if !value.is_finite() || value < 0.0 {
+                        return false;
+                    }
+                    self.filters.max_price_eur = Some(value);
+                } else {
+                    return false;
+                }
+            }
+            FilterInputKind::MinCpuScore => {
+                if input.is_empty() {
+                    self.filters.min_cpu_score = None;
+                } else if let Ok(value) = input.parse::<u32>() {
+                    self.filters.min_cpu_score = Some(value);
+                } else {
+                    return false;
+                }
+            }
+            FilterInputKind::MinCoreCount => {
+                if input.is_empty() {
+                    self.filters.min_core_count = None;
+                } else if let Ok(value) = input.parse::<u32>() {
+                    self.filters.min_core_count = Some(value);
+                } else {
+                    return false;
+                }
+            }
+        }
+        self.rebuild_items(Some(0));
+        true
     }
 
     fn selected_item(&self) -> Option<&ListItem> {
@@ -375,6 +517,8 @@ pub async fn run() -> Result<()> {
                             Mode::Detail => handle_detail_key(key, &mut app),
                             Mode::VatDialog => handle_vat_dialog_key(key, &mut app),
                             Mode::Search => handle_search_key(key, &mut app),
+                            Mode::FilterDialog => handle_filter_dialog_key(key, &mut app),
+                            Mode::FilterInput => handle_filter_input_key(key, &mut app),
                         }
                         if prev_mode == Mode::Table && (should_quit(&key) || key.code == event::KeyCode::Esc) {
                             break;
@@ -402,8 +546,12 @@ fn move_down(key: &KeyEvent, state: &mut TableState, len: usize) {
     if matches!(key.code, event::KeyCode::Down | event::KeyCode::Char('j'))
         || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == event::KeyCode::Char('n'))
     {
+        if len == 0 {
+            state.select(None);
+            return;
+        }
         let next = state.selected().map(|i| i.saturating_add(1)).unwrap_or(0);
-        state.select(Some(next.min(len.saturating_sub(1))));
+        state.select(Some(next.min(len - 1)));
     }
 }
 
@@ -411,9 +559,13 @@ fn move_up(key: &KeyEvent, state: &mut TableState, len: usize) {
     if matches!(key.code, event::KeyCode::Up | event::KeyCode::Char('k'))
         || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == event::KeyCode::Char('p'))
     {
+        if len == 0 {
+            state.select(None);
+            return;
+        }
         let next = state.selected().map(|i| i.saturating_sub(1)).unwrap_or(0);
         state.select(Some(next));
-        if state.selected().is_none() && len > 0 {
+        if state.selected().is_none() {
             state.select(Some(0));
         }
     }
@@ -439,8 +591,15 @@ fn handle_table_key(key: KeyEvent, app: &mut App) {
         app.mode = Mode::SortDialog;
     }
 
+    if key.code == event::KeyCode::Char('f') {
+        app.filter_state.select(Some(0));
+        app.filter_input_error = false;
+        app.mode = Mode::FilterDialog;
+    }
+
     if key.code == event::KeyCode::Char('v') {
         app.vat_enabled = !app.vat_enabled;
+        app.rebuild_items(app.table_state.selected());
     }
 
     if key.code == event::KeyCode::Char('l') {
@@ -529,6 +688,87 @@ fn handle_search_key(key: KeyEvent, app: &mut App) {
     }
 }
 
+fn handle_filter_dialog_key(key: KeyEvent, app: &mut App) {
+    const FILTER_OPTION_COUNT: usize = 4;
+    move_down(&key, &mut app.filter_state, FILTER_OPTION_COUNT);
+    move_up(&key, &mut app.filter_state, FILTER_OPTION_COUNT);
+
+    if key.code == event::KeyCode::Char('p') {
+        app.open_filter_input(FilterInputKind::MaxPrice);
+        return;
+    }
+
+    if key.code == event::KeyCode::Char('s') {
+        app.open_filter_input(FilterInputKind::MinCpuScore);
+        return;
+    }
+
+    if key.code == event::KeyCode::Char('c') {
+        app.open_filter_input(FilterInputKind::MinCoreCount);
+        return;
+    }
+
+    if key.code == event::KeyCode::Char('x') {
+        app.clear_filters();
+        app.mode = Mode::Table;
+        return;
+    }
+
+    if key.code == event::KeyCode::Enter {
+        match app.filter_state.selected().unwrap_or(0) {
+            0 => app.open_filter_input(FilterInputKind::MaxPrice),
+            1 => app.open_filter_input(FilterInputKind::MinCpuScore),
+            2 => app.open_filter_input(FilterInputKind::MinCoreCount),
+            3 => {
+                app.clear_filters();
+                app.mode = Mode::Table;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    if should_close(&key) {
+        app.mode = Mode::Table;
+    }
+}
+
+fn handle_filter_input_key(key: KeyEvent, app: &mut App) {
+    match key.code {
+        event::KeyCode::Char(c)
+            if filter_input_allows_char(app.filter_input_kind, c, &app.filter_input) =>
+        {
+            if app.filter_input.len() < 12 {
+                app.filter_input.push(c);
+                app.filter_input_error = false;
+            }
+        }
+        event::KeyCode::Backspace => {
+            app.filter_input.pop();
+            app.filter_input_error = false;
+        }
+        event::KeyCode::Enter => {
+            if app.apply_filter_input() {
+                app.mode = Mode::Table;
+            } else {
+                app.filter_input_error = true;
+            }
+        }
+        _ if should_close(&key) => {
+            app.filter_input_error = false;
+            app.mode = Mode::FilterDialog;
+        }
+        _ => {}
+    }
+}
+
+fn filter_input_allows_char(kind: FilterInputKind, c: char, current: &str) -> bool {
+    match kind {
+        FilterInputKind::MaxPrice => c.is_ascii_digit() || (c == '.' && !current.contains('.')),
+        FilterInputKind::MinCpuScore | FilterInputKind::MinCoreCount => c.is_ascii_digit(),
+    }
+}
+
 fn handle_vat_dialog_key(key: KeyEvent, app: &mut App) {
     match key.code {
         event::KeyCode::Char(c) if c.is_ascii_digit() || c == '.' => {
@@ -542,6 +782,7 @@ fn handle_vat_dialog_key(key: KeyEvent, app: &mut App) {
         event::KeyCode::Enter => {
             if let Ok(rate) = app.vat_input.parse::<f64>() {
                 app.vat_rate = rate.clamp(0.0, 999.0);
+                app.rebuild_items(app.table_state.selected());
             }
             app.mode = app.vat_dialog_parent;
         }
@@ -576,6 +817,7 @@ fn handle_detail_key(key: KeyEvent, app: &mut App) {
 
     if key.code == event::KeyCode::Char('v') {
         app.vat_enabled = !app.vat_enabled;
+        app.rebuild_items(app.table_state.selected());
     }
 
     if key.code == event::KeyCode::Char('t') && app.vat_enabled {
@@ -667,7 +909,12 @@ fn render_error_screen(f: &mut Frame, error: &eyre::Report) {
 
 fn render(f: &mut Frame, app: &mut App) {
     let bg = match app.mode {
-        Mode::Table | Mode::SortDialog | Mode::VatDialog | Mode::Search => C_ROW,
+        Mode::Table
+        | Mode::SortDialog
+        | Mode::VatDialog
+        | Mode::Search
+        | Mode::FilterDialog
+        | Mode::FilterInput => C_ROW,
         Mode::Detail => C_DIALOG_BG,
     };
     f.render_widget(Block::default().style(Style::default().bg(bg)), f.area());
@@ -690,6 +937,14 @@ fn render(f: &mut Frame, app: &mut App) {
             render_table(f, app);
             render_search_dialog(f, app);
         }
+        Mode::FilterDialog => {
+            render_table(f, app);
+            render_filter_dialog(f, app);
+        }
+        Mode::FilterInput => {
+            render_table(f, app);
+            render_filter_input_dialog(f, app);
+        }
     }
 }
 
@@ -708,7 +963,7 @@ fn render_table(f: &mut Frame, app: &mut App) {
         SortField::Storage => "storage/€",
         SortField::Ram => "ram/€",
     };
-    let header = Line::from(vec![
+    let mut header_spans = vec![
         Span::styled("⟨", Style::default().fg(C_ACCENT)),
         Span::styled(
             " hzfind ",
@@ -723,21 +978,33 @@ fn render_table(f: &mut Frame, app: &mut App) {
             Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
         ),
         Span::styled("  [s]", Style::default().fg(C_DIM)),
-    ]);
-    let header = if app.vat_enabled {
-        let mut spans = header.spans;
-        spans.push(Span::raw("    "));
-        spans.push(Span::styled(
+        Span::raw("    "),
+        Span::styled("Filters: ", Style::default().fg(C_DIM)),
+        Span::styled(
+            if app.filters.is_active() {
+                app.filters.summary()
+            } else {
+                "none".to_string()
+            },
+            Style::default().fg(if app.filters.is_active() {
+                C_ACCENT
+            } else {
+                C_DIM
+            }),
+        ),
+        Span::styled("  [f]", Style::default().fg(C_DIM)),
+    ];
+    if app.vat_enabled {
+        header_spans.push(Span::raw("    "));
+        header_spans.push(Span::styled(
             format!(" VAT {:.0}% ", app.vat_rate),
             Style::default()
                 .fg(Color::Black)
                 .bg(C_VAT_BADGE)
                 .add_modifier(Modifier::BOLD),
         ));
-        Line::from(spans)
-    } else {
-        header
-    };
+    }
+    let header = Line::from(header_spans);
 
     let header_block = Block::default()
         .style(Style::default().bg(C_HEADER_BG).fg(C_HEADER_FG))
@@ -894,14 +1161,10 @@ fn render_table(f: &mut Frame, app: &mut App) {
                 Cell::new(format!("{:.1}", item.ram_gb_per_eur)),
                 Cell::new(format!("{:.1}", item.storage_gb_per_eur)),
                 Cell::new("│").style(sep_style),
-                Cell::new(if app.vat_enabled {
-                    format!(
-                        "€{:.2}",
-                        item.price_monthly_eur * (1.0 + app.vat_rate / 100.0)
-                    )
-                } else {
-                    format!("€{:.2}", item.price_monthly_eur)
-                }),
+                Cell::new(format!(
+                    "€{:.2}",
+                    item_display_price_eur(item, app.vat_enabled, app.vat_rate)
+                )),
                 Cell::new("│").style(sep_style),
                 Cell::new(item.hz_datacenter_location.as_str()),
             ];
@@ -951,7 +1214,11 @@ fn render_table(f: &mut Frame, app: &mut App) {
     );
 
     // ── Footer ───────────────────────────────────────────────────────────
-    let count = app.items.len();
+    let count_text = if app.filters.is_active() {
+        format!("{} of {} servers", app.items.len(), app.all_items.len())
+    } else {
+        format!("{} servers", app.items.len())
+    };
     let live_tag = if app.live {
         " │ l disable live mode"
     } else {
@@ -959,13 +1226,11 @@ fn render_table(f: &mut Frame, app: &mut App) {
     };
     let footer_text = if app.vat_enabled {
         format!(
-            " {} servers │ ↑↓ navigate │ / search │ s sort │ v toggle VAT │ t VAT rate │ Enter details │{live_tag} │ q/Esc quit ",
-            count
+            " {count_text} │ ↑↓ navigate │ / search │ s sort │ f filters │ v toggle VAT │ t VAT rate │ Enter details │{live_tag} │ q/Esc quit "
         )
     } else {
         format!(
-            " {} servers │ ↑↓ navigate │ / search │ s sort │ Enter details │{live_tag} │ q/Esc quit ",
-            count
+            " {count_text} │ ↑↓ navigate │ / search │ s sort │ f filters │ Enter details │{live_tag} │ q/Esc quit "
         )
     };
     let footer_block = Block::default().style(Style::default().bg(C_FOOTER_BG).fg(C_FOOTER_FG));
@@ -1020,6 +1285,141 @@ fn render_sort_dialog(f: &mut Frame, app: &mut App) {
         .highlight_spacing(HighlightSpacing::Always);
 
     f.render_stateful_widget(table, area, &mut app.sort_state);
+}
+
+fn render_filter_dialog(f: &mut Frame, app: &mut App) {
+    let area = centered_rect(52, 12, f.area());
+    f.render_widget(Clear, area);
+
+    let rows = vec![
+        Row::new([Cell::new(format!(
+            "[p] Max price        {}",
+            optional_price_text(app.filters.max_price_eur)
+        ))]),
+        Row::new([Cell::new(format!(
+            "[s] Min CPU score    {}",
+            optional_number_text(app.filters.min_cpu_score)
+        ))]),
+        Row::new([Cell::new(format!(
+            "[c] Min core count   {}",
+            optional_number_text(app.filters.min_core_count)
+        ))]),
+        Row::new([Cell::new("[x] Clear all filters")]),
+    ];
+
+    let table = Table::new(rows, [Constraint::Percentage(100)])
+        .header(
+            Row::new([Cell::new("Filter by")])
+                .style(Style::default().fg(C_ACCENT).bold())
+                .bottom_margin(1),
+        )
+        .block(
+            Block::default()
+                .title(" Filters ")
+                .title_alignment(Alignment::Center)
+                .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(C_DIALOG_BORDER))
+                .style(Style::default().bg(C_DIALOG_BG).fg(C_VALUE)),
+        )
+        .row_highlight_style(
+            Style::default()
+                .fg(C_DIALOG_HIGHLIGHT_FG)
+                .bg(C_DIALOG_HIGHLIGHT_BG)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_spacing(HighlightSpacing::Always);
+
+    f.render_stateful_widget(table, area, &mut app.filter_state);
+}
+
+fn render_filter_input_dialog(f: &mut Frame, app: &mut App) {
+    let area = centered_rect(52, 8, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(filter_input_title(app.filter_input_kind))
+        .title_alignment(Alignment::Center)
+        .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(C_DIALOG_BORDER))
+        .style(Style::default().bg(C_DIALOG_BG));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let lines = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    f.render_widget(
+        ratatui::widgets::Paragraph::new(filter_input_prompt(app.filter_input_kind, app)),
+        lines[0],
+    );
+
+    let input_with_cursor = format!("{}█", app.filter_input);
+    f.render_widget(
+        ratatui::widgets::Paragraph::new(input_with_cursor).style(Style::default().fg(C_VALUE)),
+        lines[1],
+    );
+
+    f.render_widget(
+        ratatui::widgets::Paragraph::new("Leave empty to clear this filter.")
+            .style(Style::default().fg(C_DIM)),
+        lines[2],
+    );
+
+    let status = if app.filter_input_error {
+        Line::from(Span::styled(
+            "Enter a valid non-negative number.",
+            Style::default().fg(C_WORSE),
+        ))
+    } else {
+        Line::from(Span::styled(
+            "Enter applies, Esc returns to filters.",
+            Style::default().fg(C_DIM),
+        ))
+    };
+    f.render_widget(ratatui::widgets::Paragraph::new(status), lines[3]);
+}
+
+fn optional_price_text(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("€{value:.2}"))
+        .unwrap_or_else(|| "off".to_string())
+}
+
+fn optional_number_text(value: Option<u32>) -> String {
+    value
+        .map(|value| format_number(value as u64))
+        .unwrap_or_else(|| "off".to_string())
+}
+
+fn filter_input_title(kind: FilterInputKind) -> &'static str {
+    match kind {
+        FilterInputKind::MaxPrice => " Max Price ",
+        FilterInputKind::MinCpuScore => " Minimum CPU Score ",
+        FilterInputKind::MinCoreCount => " Minimum Core Count ",
+    }
+}
+
+fn filter_input_prompt(kind: FilterInputKind, app: &App) -> String {
+    match kind {
+        FilterInputKind::MaxPrice => {
+            let vat_label = if app.vat_enabled {
+                "VAT incl."
+            } else {
+                "VAT excl."
+            };
+            format!("Maximum monthly price in EUR ({vat_label}):")
+        }
+        FilterInputKind::MinCpuScore => "Minimum total CPU score:".to_string(),
+        FilterInputKind::MinCoreCount => "Minimum total cores:".to_string(),
+    }
 }
 
 fn render_vat_dialog(f: &mut Frame, app: &mut App) {
@@ -1092,7 +1492,11 @@ fn render_detail(f: &mut Frame, app: &mut App) {
         ),
         detail_line(
             "  PassMark",
-            &match (item.individual_cpu_score, item.total_cpu_score, item.cpu_count) {
+            &match (
+                item.individual_cpu_score,
+                item.total_cpu_score,
+                item.cpu_count,
+            ) {
                 (Some(indiv), Some(total), count) if count > 1 => format!(
                     "{} ({} per CPU × {count} CPUs)",
                     format_number(total as u64),
@@ -1119,12 +1523,7 @@ fn render_detail(f: &mut Frame, app: &mut App) {
     } else {
         "—".to_string()
     };
-    lines.push(detail_line(
-        "  Storage",
-        &storage_text,
-        label,
-        value,
-    ));
+    lines.push(detail_line("  Storage", &storage_text, label, value));
 
     // ── Auction-specific pricing section ──
     if let Some(ref auction) = app.selected_auction {
@@ -1289,7 +1688,12 @@ fn render_detail(f: &mut Frame, app: &mut App) {
         Span::styled("Location & Network", section),
         Span::styled(" ──────────────────────", label),
     ]));
-    lines.push(detail_line("  Datacenter", &item.hz_datacenter_location, label, value));
+    lines.push(detail_line(
+        "  Datacenter",
+        &item.hz_datacenter_location,
+        label,
+        value,
+    ));
 
     if let Some(ref auction) = app.selected_auction {
         lines.push(detail_line("  Traffic", &auction.traffic, label, value));
@@ -1421,6 +1825,14 @@ fn render_detail(f: &mut Frame, app: &mut App) {
     );
 }
 
+fn item_display_price_eur(item: &ListItem, vat_enabled: bool, vat_rate: f64) -> f64 {
+    if vat_enabled {
+        item.price_monthly_eur * (1.0 + vat_rate / 100.0)
+    } else {
+        item.price_monthly_eur
+    }
+}
+
 fn format_number(n: u64) -> String {
     n.to_formatted_string(&num_format::Locale::en)
 }
@@ -1542,8 +1954,12 @@ fn render_search_dialog(f: &mut Frame, app: &mut App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let lines = Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Length(1)])
-        .split(inner);
+    let lines = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
 
     let prompt = Line::from(vec![Span::styled(
         "Search (ID, CPU, location):",
@@ -1558,20 +1974,60 @@ fn render_search_dialog(f: &mut Frame, app: &mut App) {
     );
 
     let status = if app.search_no_match {
-        Line::from(Span::styled(
-            "No match found",
-            Style::default().fg(C_WORSE),
-        ))
+        Line::from(Span::styled("No match found", Style::default().fg(C_WORSE)))
     } else if app.search_query.is_empty() {
-        Line::from(Span::styled(
-            "Type to search…",
-            Style::default().fg(C_DIM),
-        ))
+        Line::from(Span::styled("Type to search…", Style::default().fg(C_DIM)))
     } else {
-        Line::from(Span::styled(
-            "Match found",
-            Style::default().fg(C_BETTER),
-        ))
+        Line::from(Span::styled("Match found", Style::default().fg(C_BETTER)))
     };
     f.render_widget(ratatui::widgets::Paragraph::new(status), lines[2]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filters_match_max_price_against_display_price() {
+        let mut item = ListItem::default();
+        item.price_monthly_eur = 100.0;
+
+        let mut filters = Filters {
+            max_price_eur: Some(119.0),
+            ..Default::default()
+        };
+        assert!(filters.matches(&item, false, 20.0));
+        assert!(!filters.matches(&item, true, 20.0));
+
+        filters.max_price_eur = Some(120.0);
+        assert!(filters.matches(&item, true, 20.0));
+    }
+
+    #[test]
+    fn filters_require_min_cpu_score_and_cores() {
+        let mut item = ListItem::default();
+        item.total_cpu_score = Some(30_000);
+        item.total_cores = Some(8);
+
+        let filters = Filters {
+            min_cpu_score: Some(30_000),
+            min_core_count: Some(8),
+            ..Default::default()
+        };
+        assert!(filters.matches(&item, true, 20.0));
+
+        let filters = Filters {
+            min_cpu_score: Some(30_001),
+            min_core_count: Some(8),
+            ..Default::default()
+        };
+        assert!(!filters.matches(&item, true, 20.0));
+
+        item.total_cpu_score = None;
+        let filters = Filters {
+            min_cpu_score: Some(1),
+            ..Default::default()
+        };
+        assert!(!filters.matches(&item, true, 20.0));
+    }
 }
