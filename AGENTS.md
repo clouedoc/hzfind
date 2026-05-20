@@ -51,7 +51,7 @@ pub struct HetznerAuction {
     pub ip_price: IpPrice,
     pub datacenter: String,
     pub fixed_price: bool,
-    pub next_reduce: u64,
+    pub next_reduce: i64,
     pub next_reduce_timestamp: Option<u64>,
     pub traffic: String,
     pub bandwidth: u32,

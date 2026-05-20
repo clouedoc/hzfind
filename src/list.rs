@@ -142,7 +142,6 @@ pub fn sort_items(items: &mut [ListItem], field: SortField) {
 mod tests {
     use super::*;
     use hzfind::hetzner_auction::fetch_auctions;
-    use hzfind::passmark::PASSMARK_SCORES;
 
     #[tokio::test]
     async fn list_computes_fields_correctly() {
@@ -170,10 +169,9 @@ mod tests {
             assert!(spe > 0.0);
         }
 
-        if let (Some(cores), Some(indiv_score)) = (first.total_cores, first.individual_cpu_score) {
-            let score = PASSMARK_SCORES
-                .iter()
-                .find(|s| s.cpumark == indiv_score)
+        if let Some(cores) = first.total_cores {
+            let score = first_auction
+                .cpu_passmark_score()
                 .expect("matching passmark entry not found");
             assert_eq!(cores, score.cores * first.cpu_count);
             assert_eq!(first.p_cores, Some(score.p_cores));

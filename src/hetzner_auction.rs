@@ -20,7 +20,7 @@ pub struct HetznerAuction {
     pub ip_price: IpPrice,
     pub datacenter: String,
     pub fixed_price: bool,
-    pub next_reduce: u64,
+    pub next_reduce: i64,
     pub next_reduce_timestamp: Option<u64>,
     pub traffic: String,
     pub bandwidth: u32,
@@ -53,7 +53,7 @@ struct RawHetznerAuction {
     ip_price: RawIpPrice,
     datacenter: String,
     fixed_price: bool,
-    next_reduce: u64,
+    next_reduce: i64,
     next_reduce_timestamp: u64,
     traffic: String,
     bandwidth: u32,
@@ -128,9 +128,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_auctions_successfully() {
-        let auctions = fetch_auctions()
-            .await
-            .expect("fetch should succeed");
+        let auctions = fetch_auctions().await.expect("fetch should succeed");
         assert!(!auctions.is_empty());
         let first = &auctions[0];
         assert!(!first.cpu.is_empty());
