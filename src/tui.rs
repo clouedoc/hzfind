@@ -23,7 +23,7 @@ use ratatui::widgets::{
 
 use tokio::sync::RwLock;
 
-use crate::list::{ListItem, SortField, build_list, sort_items};
+use crate::list::{ListItem, SortField, build_list, sort_items as sort_list_items};
 use hzfind::hetzner_auction::{HetznerAuction, fetch_auctions};
 use hzfind::hetzner_cloud::HETZNER_CLOUD_SERVERS;
 
@@ -88,6 +88,93 @@ enum FilterInputKind {
     MinCoreCount,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TableSort {
+    CpuPerEur,
+    RamPerEur,
+    StoragePerEur,
+    CpuScore,
+    Ram,
+    Storage,
+}
+
+impl TableSort {
+    const OPTIONS: [Self; 6] = [
+        Self::CpuPerEur,
+        Self::RamPerEur,
+        Self::StoragePerEur,
+        Self::CpuScore,
+        Self::Ram,
+        Self::Storage,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::CpuPerEur => "CPU score/€",
+            Self::RamPerEur => "RAM/€",
+            Self::StoragePerEur => "Storage/€",
+            Self::CpuScore => "CPU score",
+            Self::Ram => "RAM",
+            Self::Storage => "Storage",
+        }
+    }
+
+    fn shortcut(self) -> char {
+        match self {
+            Self::CpuPerEur => 'c',
+            Self::RamPerEur => 'r',
+            Self::StoragePerEur => 's',
+            Self::CpuScore => 'C',
+            Self::Ram => 'R',
+            Self::Storage => 'S',
+        }
+    }
+
+    fn from_shortcut(shortcut: char) -> Option<Self> {
+        Self::OPTIONS
+            .iter()
+            .copied()
+            .find(|sort| sort.shortcut() == shortcut)
+    }
+
+    fn from_index(index: usize) -> Option<Self> {
+        Self::OPTIONS.get(index).copied()
+    }
+
+    fn index(self) -> usize {
+        Self::OPTIONS
+            .iter()
+            .position(|sort| *sort == self)
+            .expect("table sort option must be listed in OPTIONS")
+    }
+
+    fn active_col(self) -> usize {
+        match self {
+            Self::CpuScore => 6,
+            Self::Ram => 7,
+            Self::Storage => 8,
+            Self::CpuPerEur => 10,
+            Self::RamPerEur => 11,
+            Self::StoragePerEur => 12,
+        }
+    }
+
+    fn sort_items(self, items: &mut [ListItem]) {
+        match self {
+            Self::CpuPerEur => sort_list_items(items, SortField::Cpu),
+            Self::RamPerEur => sort_list_items(items, SortField::Ram),
+            Self::StoragePerEur => sort_list_items(items, SortField::Storage),
+            Self::CpuScore => items.sort_by(|a, b| {
+                b.total_cpu_score
+                    .unwrap_or(0)
+                    .cmp(&a.total_cpu_score.unwrap_or(0))
+            }),
+            Self::Ram => items.sort_by(|a, b| b.ram_size_gb.cmp(&a.ram_size_gb)),
+            Self::Storage => items.sort_by(|a, b| b.total_storage_gb.cmp(&a.total_storage_gb)),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 struct Filters {
     max_price_eur: Option<f64>,
@@ -132,14 +219,13 @@ struct App {
     all_items: Vec<ListItem>,
     items: Vec<ListItem>,
     auctions: Vec<HetznerAuction>,
-    sort: SortField,
+    sort: TableSort,
     mode: Mode,
     table_state: TableState,
     sort_state: TableState,
     filter_state: TableState,
     selected_auction: Option<HetznerAuction>,
     selected_item_data: Option<ListItem>,
-    sort_names: Vec<&'static str>,
     detail_scroll: u16,
     vat_enabled: bool,
     vat_rate: f64,
@@ -162,7 +248,7 @@ struct App {
 
 impl App {
     fn new(mut items: Vec<ListItem>, auctions: Vec<HetznerAuction>) -> Self {
-        sort_items(&mut items, SortField::Cpu);
+        TableSort::CpuPerEur.sort_items(&mut items);
         let mut table_state = TableState::default();
         table_state.select((!items.is_empty()).then_some(0));
         let last_fetched = Instant::now();
@@ -176,14 +262,13 @@ impl App {
             all_items: items.clone(),
             items,
             auctions,
-            sort: SortField::Cpu,
+            sort: TableSort::CpuPerEur,
             mode: Mode::Table,
             table_state,
             sort_state: TableState::default().with_selected(0),
             filter_state: TableState::default().with_selected(0),
             selected_auction: None,
             selected_item_data: None,
-            sort_names: vec!["CPU score/€", "RAM/€", "Storage/€"],
             detail_scroll: 0,
             vat_enabled: true,
             vat_rate: DEFAULT_VAT_RATE,
@@ -240,7 +325,7 @@ impl App {
             let result = async {
                 let auctions = fetch_auctions().await?;
                 let mut items = build_list(&auctions);
-                sort_items(&mut items, sort);
+                sort.sort_items(&mut items);
                 eyre::Ok((items, auctions))
             }
             .await;
@@ -273,7 +358,7 @@ impl App {
             .filter(|item| self.filters.matches(item, self.vat_enabled, self.vat_rate))
             .cloned()
             .collect();
-        sort_items(&mut items, self.sort);
+        self.sort.sort_items(&mut items);
         self.items = items;
         self.table_state.select(match self.items.len() {
             0 => None,
@@ -583,11 +668,7 @@ fn handle_table_key(key: KeyEvent, app: &mut App) {
     }
 
     if key.code == event::KeyCode::Char('s') {
-        app.sort_state.select(Some(match app.sort {
-            SortField::Cpu => 0,
-            SortField::Ram => 1,
-            SortField::Storage => 2,
-        }));
+        app.sort_state.select(Some(app.sort.index()));
         app.mode = Mode::SortDialog;
     }
 
@@ -621,38 +702,21 @@ fn handle_table_key(key: KeyEvent, app: &mut App) {
 }
 
 fn handle_sort_dialog_key(key: KeyEvent, app: &mut App) {
-    move_down(&key, &mut app.sort_state, app.sort_names.len());
-    move_up(&key, &mut app.sort_state, app.sort_names.len());
+    move_down(&key, &mut app.sort_state, TableSort::OPTIONS.len());
+    move_up(&key, &mut app.sort_state, TableSort::OPTIONS.len());
 
-    if key.code == event::KeyCode::Char('c') {
-        app.sort = SortField::Cpu;
-        app.apply_sort();
-        app.mode = Mode::Table;
-        return;
-    }
-
-    if key.code == event::KeyCode::Char('r') {
-        app.sort = SortField::Ram;
-        app.apply_sort();
-        app.mode = Mode::Table;
-        return;
-    }
-
-    if key.code == event::KeyCode::Char('s') {
-        app.sort = SortField::Storage;
+    if let event::KeyCode::Char(shortcut) = key.code
+        && let Some(sort) = TableSort::from_shortcut(shortcut)
+    {
+        app.sort = sort;
         app.apply_sort();
         app.mode = Mode::Table;
         return;
     }
 
     if key.code == event::KeyCode::Enter {
-        if let Some(i) = app.sort_state.selected() {
-            app.sort = match i {
-                0 => SortField::Cpu,
-                1 => SortField::Ram,
-                2 => SortField::Storage,
-                _ => app.sort,
-            };
+        if let Some(sort) = app.sort_state.selected().and_then(TableSort::from_index) {
+            app.sort = sort;
             app.apply_sort();
         }
         app.mode = Mode::Table;
@@ -958,11 +1022,7 @@ fn render_table(f: &mut Frame, app: &mut App) {
     .split(area);
 
     // ── Header ───────────────────────────────────────────────────────────
-    let sort_label = match app.sort {
-        SortField::Cpu => "cpu score/€",
-        SortField::Storage => "storage/€",
-        SortField::Ram => "ram/€",
-    };
+    let sort_label = app.sort.label();
     let mut header_spans = vec![
         Span::styled("⟨", Style::default().fg(C_ACCENT)),
         Span::styled(
@@ -1068,6 +1128,7 @@ fn render_table(f: &mut Frame, app: &mut App) {
         Constraint::Length(1),           // sep
         Constraint::Length(4),           // CPU#
         Constraint::Length(8),           // Cores
+        Constraint::Length(8),           // CPU Sc
         Constraint::Length(8),           // RAM
         Constraint::Length(10),          // Storage
         Constraint::Length(1),           // sep
@@ -1080,13 +1141,9 @@ fn render_table(f: &mut Frame, app: &mut App) {
         Constraint::Length(9),           // DC
     ];
 
-    let active_col = match app.sort {
-        SortField::Cpu => 9,
-        SortField::Ram => 10,
-        SortField::Storage => 11,
-    };
+    let active_col = app.sort.active_col();
     let sep_style = Style::default().fg(C_DIM);
-    const SEP_COLS: [usize; 5] = [1, 3, 8, 12, 14];
+    const SEP_COLS: [usize; 5] = [1, 3, 9, 13, 15];
     let header_cells: Vec<Cell> = [
         "ID",
         "│",
@@ -1094,6 +1151,7 @@ fn render_table(f: &mut Frame, app: &mut App) {
         "│",
         "CPU#",
         "Cores",
+        "CPU Sc",
         "RAM",
         "Storage",
         "│",
@@ -1150,6 +1208,11 @@ fn render_table(f: &mut Frame, app: &mut App) {
                         .map(|c| c.to_string())
                         .unwrap_or_else(|| "—".into()),
                 }),
+                Cell::new(
+                    item.total_cpu_score
+                        .map(|score| format_number(score as u64))
+                        .unwrap_or_else(|| "—".into()),
+                ),
                 Cell::new(format!("{} GB", item.ram_size_gb)),
                 Cell::new(storage_str(item.total_storage_gb)),
                 Cell::new("│").style(sep_style),
@@ -1243,22 +1306,12 @@ fn render_table(f: &mut Frame, app: &mut App) {
 }
 
 fn render_sort_dialog(f: &mut Frame, app: &mut App) {
-    let area = centered_rect(30, 9, f.area());
+    let area = centered_rect(34, 12, f.area());
     f.render_widget(Clear, area);
 
-    let rows: Vec<Row> = app
-        .sort_names
+    let rows: Vec<Row> = TableSort::OPTIONS
         .iter()
-        .enumerate()
-        .map(|(i, name)| {
-            let shortcut = match i {
-                0 => "c",
-                1 => "r",
-                2 => "s",
-                _ => "",
-            };
-            Row::new([Cell::new(format!("[{shortcut}] {name}"))])
-        })
+        .map(|sort| Row::new([Cell::new(format!("[{}] {}", sort.shortcut(), sort.label()))]))
         .collect();
 
     let table = Table::new(rows, [Constraint::Percentage(100)])
@@ -1491,7 +1544,7 @@ fn render_detail(f: &mut Frame, app: &mut App) {
             value,
         ),
         detail_line(
-            "  PassMark",
+            "  PassMark (CPU Score)",
             &match (
                 item.individual_cpu_score,
                 item.total_cpu_score,
@@ -2029,5 +2082,58 @@ mod tests {
             ..Default::default()
         };
         assert!(!filters.matches(&item, true, 20.0));
+    }
+
+    #[test]
+    fn table_sort_absolute_fields_descending() {
+        let mut items = vec![
+            {
+                let mut item = ListItem::default();
+                item.total_cpu_score = Some(20_000);
+                item.ram_size_gb = 64;
+                item.total_storage_gb = 512;
+                item
+            },
+            {
+                let mut item = ListItem::default();
+                item.total_cpu_score = Some(30_000);
+                item.ram_size_gb = 32;
+                item.total_storage_gb = 2_048;
+                item
+            },
+            {
+                let mut item = ListItem::default();
+                item.ram_size_gb = 128;
+                item.total_storage_gb = 1_024;
+                item
+            },
+        ];
+
+        TableSort::CpuScore.sort_items(&mut items);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.total_cpu_score)
+                .collect::<Vec<_>>(),
+            vec![Some(30_000), Some(20_000), None]
+        );
+
+        TableSort::Ram.sort_items(&mut items);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.ram_size_gb)
+                .collect::<Vec<_>>(),
+            vec![128, 64, 32]
+        );
+
+        TableSort::Storage.sort_items(&mut items);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.total_storage_gb)
+                .collect::<Vec<_>>(),
+            vec![2_048, 1_024, 512]
+        );
     }
 }
