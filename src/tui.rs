@@ -25,7 +25,6 @@ use tokio::sync::RwLock;
 
 use crate::list::{ListItem, SortField, build_list, sort_items as sort_list_items};
 use hzfind::hetzner_auction::{HetznerAuction, fetch_auctions};
-use hzfind::hetzner_cloud::HETZNER_CLOUD_SERVERS;
 
 // ── Colors ───────────────────────────────────────────────────────────────────
 
@@ -51,14 +50,6 @@ const C_VAT_BADGE: Color = Color::Rgb(255, 200, 80);
 const DEFAULT_VAT_RATE: f64 = 20.0;
 const C_BETTER: Color = Color::Rgb(130, 220, 130);
 const C_WORSE: Color = Color::Rgb(220, 130, 130);
-
-// ── Cloud baseline helper ──
-/// Returns the first cloud server from the embedded JSON (currently CCX33).
-fn cloud_baseline() -> &'static hzfind::hetzner_cloud::HetznerCloudServer {
-    HETZNER_CLOUD_SERVERS
-        .first()
-        .expect("assets/hetzner_cloud.json must contain at least one server")
-}
 
 // ── Shared data (background-fetch → render bridge) ─────────────────────────
 
@@ -1656,83 +1647,6 @@ fn render_detail(f: &mut Frame, app: &mut App) {
             label,
             value,
         ));
-    } else {
-        // Cloud server — show the single monthly price
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("  ", value),
-            Span::styled("Pricing", section),
-            Span::styled(" ──────────────────────", label),
-        ]));
-        lines.push(detail_line(
-            "  Monthly",
-            &if app.vat_enabled {
-                format!(
-                    "€{:.2} (VAT incl.)",
-                    item.price_monthly_eur * (1.0 + app.vat_rate / 100.0)
-                )
-            } else {
-                format!("€{:.2}", item.price_monthly_eur)
-            },
-            label,
-            Style::default().fg(C_PRICE),
-        ));
-    }
-
-    // ── vs cloud baseline comparison ──
-    if let Some(ref item) = app.selected_item_data {
-        let bl = cloud_baseline();
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("  ", value),
-            Span::styled(
-                format!("vs {} (€{:.2}/mo)", bl.name, bl.price_monthly_eur),
-                section,
-            ),
-            Span::styled(" ───────────────", label),
-        ]));
-        lines.push(comparison_line(
-            "Cores",
-            item.total_cores.map(|c| c as f64),
-            Some(bl.cores as f64),
-            label,
-            |v| format!("{}", v as u32),
-        ));
-        lines.push(comparison_line(
-            "RAM",
-            Some(item.ram_size_gb as f64),
-            Some(bl.ram_gb as f64),
-            label,
-            |v| format!("{} GB", v as u32),
-        ));
-        lines.push(comparison_line(
-            "Storage",
-            Some(item.total_storage_gb as f64),
-            Some(bl.storage_gb as f64),
-            label,
-            |v| storage_str(v as u32),
-        ));
-        lines.push(comparison_line(
-            "CPU Sc/€",
-            item.cpu_score_per_eur,
-            Some(bl.cpu_score_per_eur()),
-            label,
-            |v| format!("{v:.1}"),
-        ));
-        lines.push(comparison_line(
-            "RAM/€",
-            Some(item.ram_gb_per_eur),
-            Some(bl.ram_per_eur()),
-            label,
-            |v| format!("{v:.1}"),
-        ));
-        lines.push(comparison_line(
-            "Storage/€",
-            Some(item.storage_gb_per_eur),
-            Some(bl.storage_per_eur()),
-            label,
-            |v| format!("{v:.1}"),
-        ));
     }
 
     lines.push(Line::from(""));
@@ -1890,37 +1804,6 @@ fn format_number(n: u64) -> String {
     n.to_formatted_string(&num_format::Locale::en)
 }
 
-fn comparison_line(
-    label: &str,
-    server_val: Option<f64>,
-    baseline_val: Option<f64>,
-    label_style: Style,
-    fmt: impl Fn(f64) -> String,
-) -> Line<'static> {
-    let padded_label = format!("    {label:<12}");
-    match (server_val, baseline_val) {
-        (Some(sv), Some(bv)) => {
-            let pct = (sv - bv) / bv * 100.0;
-            let pct_color = if pct >= 0.0 { C_BETTER } else { C_WORSE };
-            let sign = if pct >= 0.0 { "+" } else { "" };
-            Line::from(vec![
-                Span::styled(padded_label, label_style),
-                Span::styled(format!("{:>8}", fmt(sv)), Style::default().fg(C_VALUE)),
-                Span::styled(" vs ", Style::default().fg(C_DIM)),
-                Span::styled(format!("{:<8}", fmt(bv)), Style::default().fg(C_DIM)),
-                Span::styled(
-                    format!("({sign}{pct:.1}%)"),
-                    Style::default().fg(pct_color).add_modifier(Modifier::BOLD),
-                ),
-            ])
-        }
-        _ => Line::from(vec![
-            Span::styled(padded_label, label_style),
-            Span::styled("       —", Style::default().fg(C_DIM)),
-        ]),
-    }
-}
-
 fn detail_line(lbl: &str, val: &str, label_style: Style, value_style: Style) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("{lbl}: "), label_style),
@@ -2039,6 +1922,40 @@ fn render_search_dialog(f: &mut Frame, app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::backend::TestBackend;
+
+    #[test]
+    fn auction_details_render_without_comparison() {
+        let mut auction = HetznerAuction::default();
+        auction.id = 123;
+        auction.cpu = "AMD Ryzen 7 7700".to_string();
+        auction.cpu_count = 1;
+        auction.ram_size = 64;
+        auction.price = 100.0;
+        auction.ip_price.monthly = 1.7;
+        auction.datacenter = "HEL1-DC8".to_string();
+        let auctions = vec![auction];
+        let mut app = App::new(build_list(&auctions), auctions);
+        assert_eq!(app.items.len(), 1);
+        app.open_detail();
+        assert_eq!(app.selected_auction.as_ref().unwrap().id, 123);
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 60)).unwrap();
+        terminal
+            .draw(|frame| render_detail(frame, &mut app))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        for expected in ["SB:123", "Pricing", "€122.04", "64 GB", "HEL1-DC8"] {
+            assert!(text.contains(expected), "missing {expected}");
+        }
+        assert!(!text.contains("vs "));
+    }
 
     #[test]
     fn filters_match_max_price_against_display_price() {

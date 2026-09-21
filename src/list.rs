@@ -3,7 +3,6 @@ use clap::ValueEnum;
 use serde::Serialize;
 
 use hzfind::hetzner_auction::HetznerAuction;
-use hzfind::hetzner_cloud::HETZNER_CLOUD_SERVERS;
 use hzfind::passmark::PassmarkScore;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -16,7 +15,6 @@ pub enum SortField {
 #[derive(Debug, Default, Clone, Serialize)]
 pub enum ListItemId {
     HetznerAuctions(u32),
-    HetznerCloud(String),
     #[default]
     None,
 }
@@ -25,7 +23,6 @@ impl std::fmt::Display for ListItemId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ListItemId::HetznerAuctions(id) => write!(f, "SB:{id}"),
-            ListItemId::HetznerCloud(name) => write!(f, "CLOUD:{name}"),
             ListItemId::None => write!(f, "—"),
         }
     }
@@ -66,7 +63,7 @@ pub struct ListItem {
 }
 
 pub fn build_list(auctions: &[HetznerAuction]) -> Vec<ListItem> {
-    let mut items: Vec<ListItem> = auctions
+    auctions
         .iter()
         .map(|auction| {
             let score: Option<&PassmarkScore> = auction.cpu_passmark_score();
@@ -97,30 +94,7 @@ pub fn build_list(auctions: &[HetznerAuction]) -> Vec<ListItem> {
                 hz_datacenter_location: auction.datacenter.clone(),
             }
         })
-        .collect();
-
-    // Append Hetzner Cloud servers as ListItems so they appear in listings.
-    for cloud in HETZNER_CLOUD_SERVERS.iter() {
-        items.push(ListItem {
-            id: ListItemId::HetznerCloud(cloud.name.clone()),
-            cpu_name: cloud.cpu_name.clone(),
-            cpu_count: 1,
-            ram_size_gb: cloud.ram_gb,
-            total_storage_gb: cloud.storage_gb,
-            total_cores: Some(cloud.cores),
-            p_cores: Some(cloud.cores),
-            e_cores: None,
-            individual_cpu_score: Some(cloud.cpumark),
-            total_cpu_score: Some(cloud.cpumark),
-            price_monthly_eur: cloud.price_monthly_eur,
-            cpu_score_per_eur: Some(cloud.cpu_score_per_eur()),
-            storage_gb_per_eur: cloud.storage_per_eur(),
-            ram_gb_per_eur: cloud.ram_per_eur(),
-            hz_datacenter_location: cloud.datacenter_location.clone(),
-        });
-    }
-
-    items
+        .collect()
 }
 
 pub fn sort_items(items: &mut [ListItem], field: SortField) {
@@ -180,16 +154,26 @@ mod tests {
     }
 
     #[test]
-    fn cloud_json_uses_current_eu_price_including_ipv4() {
-        let items = build_list(&[]);
-        let cloud = items
-            .iter()
-            .find(|item| matches!(&item.id, ListItemId::HetznerCloud(name) if name == "CCX33"))
-            .expect("CCX33 baseline should be listed without fetching auctions");
-        let json = serde_json::to_value(cloud).unwrap();
-        assert_eq!(json["price_monthly_eur"], 138.99);
-        assert_eq!(json["id"]["HetznerCloud"], "CCX33");
-        assert!((cloud.cpu_score_per_eur.unwrap() - 14698.0 / 138.99).abs() < 0.01);
+    fn empty_auctions_produce_empty_json_list() {
+        assert_eq!(serde_json::to_string(&build_list(&[])).unwrap(), "[]");
+    }
+
+    #[test]
+    fn list_contains_only_input_auctions_and_preserves_json_ids() {
+        let mut first = HetznerAuction::default();
+        first.id = 123;
+        first.price = 10.0;
+        first.ip_price.monthly = 1.7;
+        let mut second = first.clone();
+        second.id = 456;
+
+        let items = build_list(&[first, second]);
+        assert_eq!(items.len(), 2);
+        let json = serde_json::to_value(&items).unwrap();
+        assert_eq!(json[0]["id"], serde_json::json!({"HetznerAuctions": 123}));
+        assert_eq!(json[1]["id"], serde_json::json!({"HetznerAuctions": 456}));
+        assert_eq!(json[0]["price_monthly_eur"], 11.7);
+        assert_eq!(items[0].id.to_string(), "SB:123");
     }
 
     #[test]

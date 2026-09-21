@@ -5,7 +5,7 @@ use eyre::Result;
 const HETZNER_AUCTION_URL: &str =
     "https://www.hetzner.com/_resources/app/data/app/live_data_sb.json";
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Default, Deserialize, Clone)]
 pub struct HetznerAuction {
     pub id: u32,
     pub cpu: String,
@@ -32,7 +32,7 @@ pub struct HetznerAuction {
     pub dist: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Default, Deserialize, Clone)]
 pub struct IpPrice {
     pub monthly: f64,
     pub hourly: f64,

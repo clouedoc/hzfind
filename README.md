@@ -38,7 +38,6 @@ hzfind list-stats                # aggregated stats about current auction data
 1. Fetches the live Hetzner Server Auction feed (`live_data_sb_EUR.json`)
 2. Matches each server's CPU against the bundled PassMark database
 3. Computes per-euro metrics: **CPU score/€**, **RAM GB/€**, **Storage GB/€**
-4. In the TUI, optionally compares each server against a **CCX33** cloud baseline (€62.99/mo) to show relative value
 
 ## License
 

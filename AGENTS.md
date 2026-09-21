@@ -11,7 +11,7 @@ cargo check                  # type-check
 cargo clippy --all           # lint (do not suppress warnings)
 cargo test                   # run all tests
 cargo run -- explore          # launch the interactive TUI
-cargo run -- list             # JSON output of all servers
+cargo run -- list             # JSON output of auction servers only
 cargo run -- list --sort cpu --top 10  # sort + limit
 cargo run -- list-stats       # aggregated auction stats
 ```
@@ -81,7 +81,7 @@ Enriched auction entry with PassMark scores and per-euro value metrics. Produced
 
 ```rust
 pub struct ListItem {
-    pub hz_auction_id: u32,
+    pub id: ListItemId,
     pub cpu_name: String,
     pub cpu_count: u32,
     pub ram_size_gb: u32,
@@ -96,6 +96,17 @@ pub struct ListItem {
     pub storage_gb_per_eur: f64,
     pub ram_gb_per_eur: f64,
     pub hz_datacenter_location: String,
+}
+```
+
+### `ListItemId` (`src/list.rs`)
+
+Auction identifier. The JSON shape remains `{"HetznerAuctions": 123}`; `None` is the default for an unset item.
+
+```rust
+pub enum ListItemId {
+    HetznerAuctions(u32),
+    None,
 }
 ```
 
@@ -132,7 +143,7 @@ pub enum SortField {
 - Load the Rust skill before writing code or before writing a plan. This is *MANDATORY*.
 - The PassMark database is embedded at compile time via `include_str!("../assets/passmark.json")`. To refresh it, run `just passmark` (scrapes cpubenchmark.net).
 - Prices in `HetznerAuction.price` are VAT-excluded. The TUI adds VAT on top when enabled (default 20%, toggleable with v/t keys).
-- The CCX33 cloud baseline in `assets/hetzner_cloud.json` is shared by JSON listings and TUI comparisons. It is a bundled list-price snapshot, NOT a live quote: €138.99/month = €138.49 EU server price effective 2026-06-15 + €0.50 primary IPv4, excluding VAT (verified 2026-09-21). Refresh it and its regression tests when Hetzner changes prices. JSON auction prices also include IPv4 and exclude VAT.
+- JSON listings and the TUI contain only fetched auction servers. `build_list()` returns one item per input auction (an empty input produces an empty list). JSON prices include IPv4 and exclude VAT.
 
 ## Maintenance: Keep AGENTS.md in sync
 
