@@ -169,8 +169,8 @@ impl TableSort {
                     .unwrap_or(0)
                     .cmp(&a.total_cpu_score.unwrap_or(0))
             }),
-            Self::Ram => items.sort_by(|a, b| b.ram_size_gb.cmp(&a.ram_size_gb)),
-            Self::Storage => items.sort_by(|a, b| b.total_storage_gb.cmp(&a.total_storage_gb)),
+            Self::Ram => items.sort_by_key(|item| std::cmp::Reverse(item.ram_size_gb)),
+            Self::Storage => items.sort_by_key(|item| std::cmp::Reverse(item.total_storage_gb)),
         }
     }
 }
@@ -1847,7 +1847,7 @@ fn render_detail(f: &mut Frame, app: &mut App) {
 
     let content_height = lines.len();
     let visible_height = inner.height as usize;
-    let max_scroll = content_height.saturating_sub(visible_height).max(0) as u16;
+    let max_scroll = content_height.saturating_sub(visible_height) as u16;
     app.detail_scroll = app.detail_scroll.min(max_scroll);
     f.render_widget(
         ratatui::widgets::Paragraph::new(lines)

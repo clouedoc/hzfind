@@ -180,6 +180,19 @@ mod tests {
     }
 
     #[test]
+    fn cloud_json_uses_current_eu_price_including_ipv4() {
+        let items = build_list(&[]);
+        let cloud = items
+            .iter()
+            .find(|item| matches!(&item.id, ListItemId::HetznerCloud(name) if name == "CCX33"))
+            .expect("CCX33 baseline should be listed without fetching auctions");
+        let json = serde_json::to_value(cloud).unwrap();
+        assert_eq!(json["price_monthly_eur"], 138.99);
+        assert_eq!(json["id"]["HetznerCloud"], "CCX33");
+        assert!((cloud.cpu_score_per_eur.unwrap() - 14698.0 / 138.99).abs() < 0.01);
+    }
+
+    #[test]
     fn sort_items_works() {
         let mut items = vec![
             {

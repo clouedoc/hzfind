@@ -18,7 +18,8 @@ pub struct HetznerCloudServer {
     pub threads: u32,
     /// PassMark CPU score.
     pub cpumark: u32,
-    /// Monthly price in EUR (excl. VAT).
+    /// Monthly price in EUR including primary IPv4, excluding VAT.
+    /// This is an embedded list-price snapshot, not a live account quote.
     pub price_monthly_eur: f64,
     /// Datacenter location (e.g. "HEL1").
     pub datacenter_location: String,
@@ -66,7 +67,8 @@ mod tests {
         assert_eq!(ccx33.storage_gb, 240);
         assert_eq!(ccx33.cores, 4);
         assert_eq!(ccx33.cpumark, 14698);
-        assert!((ccx33.price_monthly_eur - 62.99).abs() < f64::EPSILON);
+        // EU list price effective 2026-06-15 + primary IPv4, excluding VAT.
+        assert!((ccx33.price_monthly_eur - (138.49 + 0.50)).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -75,9 +77,9 @@ mod tests {
             .iter()
             .find(|s| s.name == "CCX33")
             .expect("CCX33 should exist");
-        let expected_cpu_per_eur = 14698.0_f64 / 62.99;
-        let expected_ram_per_eur = 32.0_f64 / 62.99;
-        let expected_storage_per_eur = 240.0_f64 / 62.99;
+        let expected_cpu_per_eur = 14698.0_f64 / 138.99;
+        let expected_ram_per_eur = 32.0_f64 / 138.99;
+        let expected_storage_per_eur = 240.0_f64 / 138.99;
         assert!((ccx33.cpu_score_per_eur() - expected_cpu_per_eur).abs() < 0.01);
         assert!((ccx33.ram_per_eur() - expected_ram_per_eur).abs() < 0.01);
         assert!((ccx33.storage_per_eur() - expected_storage_per_eur).abs() < 0.01);

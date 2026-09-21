@@ -132,7 +132,7 @@ pub enum SortField {
 - Load the Rust skill before writing code or before writing a plan. This is *MANDATORY*.
 - The PassMark database is embedded at compile time via `include_str!("../assets/passmark.json")`. To refresh it, run `just passmark` (scrapes cpubenchmark.net).
 - Prices in `HetznerAuction.price` are VAT-excluded. The TUI adds VAT on top when enabled (default 20%, toggleable with v/t keys).
-- The CCX33 cloud baseline constants in `tui.rs` are used for comparison in the detail view.
+- The CCX33 cloud baseline in `assets/hetzner_cloud.json` is shared by JSON listings and TUI comparisons. It is a bundled list-price snapshot, NOT a live quote: €138.99/month = €138.49 EU server price effective 2026-06-15 + €0.50 primary IPv4, excluding VAT (verified 2026-09-21). Refresh it and its regression tests when Hetzner changes prices. JSON auction prices also include IPv4 and exclude VAT.
 
 ## Maintenance: Keep AGENTS.md in sync
 
